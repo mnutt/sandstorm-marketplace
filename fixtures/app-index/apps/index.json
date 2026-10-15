@@ -1,0 +1,52 @@
+{
+  "apps": [
+    {
+      "appId": "h37dm17aa89yrd8zuqpdn36p6zntumtv08fjpu8a8zrte7q1cn60",
+      "name": "Etherpad",
+      "version": "1.0.0",
+      "packageId": "pkg-etherpad-0001",
+      "imageId": "etherpad.svg",
+      "webLink": "https://www.etherpad.org/",
+      "codeLink": "https://github.com/ether/etherpad-lite",
+      "isOpenSource": true,
+      "categories": ["Productivity", "Collaboration"],
+      "author": {
+        "name": "Sandstorm Demo Author",
+        "keybaseUsername": "",
+        "picture": "",
+        "githubUsername": "ether",
+        "twitterUsername": "",
+        "hackernewsUsername": "",
+        "redditUsername": ""
+      },
+      "upstreamAuthor": "Etherpad contributors",
+      "shortDescription": "Collaborative editor",
+      "createdAt": "2024-01-12T00:00:00Z",
+      "versionNumber": 1
+    },
+    {
+      "appId": "m86q05rdvj14yvn78ghaxynqz7u2svw6rnttptxx49g1785cdv1h",
+      "name": "Wekan",
+      "version": "7.11.0",
+      "packageId": "pkg-wekan-0001",
+      "imageId": "wekan.svg",
+      "webLink": "https://wekan.github.io/",
+      "codeLink": "https://github.com/wekan/wekan",
+      "isOpenSource": true,
+      "categories": ["Productivity"],
+      "author": {
+        "name": "Sandstorm Demo Author",
+        "keybaseUsername": "",
+        "picture": "",
+        "githubUsername": "wekan",
+        "twitterUsername": "",
+        "hackernewsUsername": "",
+        "redditUsername": ""
+      },
+      "upstreamAuthor": "Wekan maintainers",
+      "shortDescription": "Kanban boards",
+      "createdAt": "2024-02-01T00:00:00Z",
+      "versionNumber": 1
+    }
+  ]
+}

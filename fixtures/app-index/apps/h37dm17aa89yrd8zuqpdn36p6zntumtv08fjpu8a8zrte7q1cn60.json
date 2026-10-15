@@ -1,0 +1,11 @@
+{
+  "description": "Etherpad lets teams edit the same document at the same time. This fixture is only here to bootstrap the Rust marketplace shape.",
+  "screenshots": [
+    {
+      "imageId": "etherpad-shot.svg",
+      "width": 1280,
+      "height": 720
+    }
+  ],
+  "license": "Apache 2.0"
+}

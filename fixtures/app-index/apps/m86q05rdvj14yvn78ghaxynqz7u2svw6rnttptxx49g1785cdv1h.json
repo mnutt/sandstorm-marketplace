@@ -1,0 +1,11 @@
+{
+  "description": "Wekan is a Trello-style task board. In the real system this data would come from the Sandstorm app-index export.",
+  "screenshots": [
+    {
+      "imageId": "wekan-shot.svg",
+      "width": 1280,
+      "height": 720
+    }
+  ],
+  "license": "MIT"
+}
