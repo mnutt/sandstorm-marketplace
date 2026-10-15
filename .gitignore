@@ -3,3 +3,5 @@
 /.DS_Store
 /data
 /marketplace.db
+/build
+/.local

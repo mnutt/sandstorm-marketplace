@@ -1,0 +1,33 @@
+[package]
+name = "marketplace-grain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+marketplace-web = { path = "../marketplace-web" }
+marketplace-model = { path = "../marketplace-model" }
+capnp = "0.21"
+capnp-rpc = "0.21"
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+ed25519-dalek = "2"
+sha2 = "0.10"
+blake2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+lzma-rust2 = "0.13"
+pgp = { version = "0.17", default-features = false }
+tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[build-dependencies]
+capnpc = "0.21"
+
+[dev-dependencies]
+libc = "0.2"
+axum.workspace = true

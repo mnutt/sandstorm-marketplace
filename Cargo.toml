@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "xtask",
+  "crates/marketplace-grain",
   "crates/marketplace-model",
   "crates/marketplace-sync",
   "crates/marketplace-web",

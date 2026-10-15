@@ -105,7 +105,7 @@ impl LoadedAppIndex {
     }
 
     pub fn image_url(&self, image_id: &str) -> String {
-        format!("/static/images/{image_id}")
+        format!("/images/{image_id}")
     }
 
     pub fn package_url(&self, package_id: &str) -> String {

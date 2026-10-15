@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Marketplace administration</title>
+<style>body{font:16px system-ui;max-width:1000px;margin:2rem auto;padding:0 1rem;color:#18202a}article{border:1px solid #ccd3db;border-radius:8px;padding:1rem;margin:1rem 0}button{margin:.25rem;padding:.5rem;cursor:pointer}pre{white-space:pre-wrap}#error{color:#a11}small{overflow-wrap:anywhere}</style>
+</head><body>
+<h1>Marketplace administration</h1>
+<p>Public marketplace: <a id="public-url" target="_blank" rel="noopener"></a></p>
+<p>Create an API token with the <strong>submitter</strong> role in Sandstorm’s Share access menu. Authors submit with:</p>
+<pre>spk publish --webkey 'ENDPOINT#TOKEN' app.spk</pre>
+<button id="reindex">Rebuild public site</button><button id="keybase">Connect Keybase</button>
+<p id="error" role="alert"></p><div id="queue"></div>
+<script>
+'use strict';
+const error = document.getElementById('error');
+async function request(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {method: 'POST', body});
+  if (!response.ok) throw new Error(await response.text());
+  return response;
+}
+function element(tag, text) { const e = document.createElement(tag); e.textContent = text; return e; }
+function report(err) { error.textContent = err.message; }
+async function refresh() {
+  const data = await (await request('queue')).json();
+  const queue = document.getElementById('queue'); queue.replaceChildren();
+  if (!data.length) queue.append(element('p', 'No packages submitted yet.'));
+  for (const item of data) {
+    const card = element('article', '');
+    card.append(element('h2', `${item.app.name} · ${item.app.version}`),
+      element('p', `${item.review} · author requested ${item.requestState}`),
+      element('small', `Package: ${item.app.packageId}`), element('p', item.contactEmail),
+      element('pre', item.details.description), element('p', item.reason));
+    for (const [action, label] of [['approve','Approve'], ['reject','Request update'], ['unapprove','Unapprove']]) {
+      const button = element('button', label);
+      button.onclick = async () => {
+        const reason = action === 'reject' ? prompt('What needs to change?') : '';
+        if (reason === null) return;
+        try { await request(`${action}/${item.app.packageId}`, reason); await refresh(); } catch (err) { report(err); }
+      }; card.append(button);
+    }
+    if (item.fingerprint) {
+      card.append(element('p', `Verified PGP fingerprint: ${item.fingerprint}`));
+      const button = element('button', 'Look up author on Keybase');
+      button.onclick = async () => { try { const result = await (await request(`keybase/${item.fingerprint}`, '')).json(); card.append(element('pre', JSON.stringify(result, null, 2))); } catch (err) { report(err); } };
+      card.append(button);
+    }
+    queue.append(card);
+  }
+}
+document.getElementById('reindex').onclick = async () => { try { await request('reindex', ''); await refresh(); } catch (err) { report(err); } };
+document.getElementById('keybase').onclick = async () => { try {
+  const descriptor = await (await request('keybase-pb-descriptor')).text();
+  window.parent.postMessage({powerboxRequest:{rpcId:'keybase-request',query:[descriptor],saveLabel:{defaultText:'Keybase API'}}}, '*');
+} catch (err) { report(err); } };
+window.addEventListener('message', async event => {
+  if (event.source !== window.parent || event.data.rpcId !== 'keybase-request' || !event.data.token) return;
+  try { await request('keybase-pb-token', event.data.token); } catch (err) { report(err); }
+});
+(async () => { try {
+  const info = await (await request('public-id')).json(); const link = document.getElementById('public-url');
+  link.href = info.autoUrl; link.textContent = info.autoUrl; await refresh();
+} catch (err) { report(err); } })();
+</script></body></html>

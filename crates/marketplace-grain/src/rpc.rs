@@ -1,0 +1,339 @@
+use crate::{
+    api_session_capnp::api_session,
+    grain_capnp::{sandstorm_api, ui_session, ui_view},
+    hack_session_capnp::hack_session_context,
+    registry::Registry,
+    util_capnp::byte_stream,
+    web_session_capnp::web_session as web,
+};
+use anyhow::{Result, bail, ensure};
+use capnp::{
+    capability::{FromClientHook, Promise},
+    traits::HasTypeId,
+};
+use std::{cell::RefCell, io::Write, rc::Rc};
+
+pub type Platform = sandstorm_api::Client<capnp::any_pointer::Owned>;
+pub type PlatformSlot = Rc<RefCell<Option<Platform>>>;
+pub fn cast<A: FromClientHook, B: FromClientHook>(client: A) -> B {
+    B::new(client.into_client_hook())
+}
+pub fn error(error: impl std::fmt::Display) -> capnp::Error {
+    capnp::Error::failed(error.to_string())
+}
+fn promise(result: Result<()>) -> Promise<(), capnp::Error> {
+    Promise::from_future(async { result.map_err(error) })
+}
+
+pub struct View {
+    pub registry: Registry,
+    pub platform: PlatformSlot,
+}
+impl ui_view::Server for View {
+    fn get_view_info(
+        &mut self,
+        _: ui_view::GetViewInfoParams,
+        mut results: ui_view::GetViewInfoResults,
+    ) -> Promise<(), capnp::Error> {
+        promise((|| {
+            results.set(crate::app_index_capnp::APP_INDEX_VIEW_INFO.get()?)?;
+            Ok(())
+        })())
+    }
+    fn new_session(
+        &mut self,
+        params: ui_view::NewSessionParams,
+        mut results: ui_view::NewSessionResults,
+    ) -> Promise<(), capnp::Error> {
+        promise((|| {
+            let params = params.get()?;
+            let permissions = params.get_user_info()?.get_permissions()?;
+            let has = |i| i < permissions.len() && permissions.get(i);
+            let api = params.get_session_type() == api_session::Client::TYPE_ID;
+            ensure!(
+                api || params.get_session_type() == web::Client::TYPE_ID,
+                "unsupported session type"
+            );
+            ensure!(
+                if api { has(2) } else { has(1) },
+                "session permission denied"
+            );
+            let session = Session {
+                registry: self.registry.clone(),
+                api,
+                can_approve: has(0),
+                context: cast(params.get_context()?),
+                platform: self.platform.clone(),
+            };
+            let client: api_session::Client = capnp_rpc::new_client(session);
+            results.get().set_session(cast(client));
+            Ok(())
+        })())
+    }
+}
+struct Session {
+    registry: Registry,
+    api: bool,
+    can_approve: bool,
+    context: hack_session_context::Client,
+    platform: PlatformSlot,
+}
+impl ui_session::Server for Session {}
+impl api_session::Server for Session {}
+impl web::Server for Session {
+    fn get(
+        &mut self,
+        params: web::GetParams,
+        mut results: web::GetResults,
+    ) -> Promise<(), capnp::Error> {
+        let registry = self.registry.clone();
+        let context = self.context.clone();
+        let api = self.api;
+        Promise::from_future(async move {
+            let action: Result<()> = async {
+                ensure!(!api, "submission API does not expose administration");
+                let path = params.get()?.get_path()?.to_str()?;
+                match path {
+                    "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
+                    "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
+                    "public-id" => {
+                        let response = context.get_public_id_request().send().promise.await?; let response = response.get()?;
+                        let body = serde_json::json!({"publicId": response.get_public_id()?.to_str()?, "hostname": response.get_hostname()?.to_str()?, "autoUrl": response.get_auto_url()?.to_str()?, "isDemoUser": response.get_is_demo_user()});
+                        content(results.get(), "application/json", &serde_json::to_vec(&body)?);
+                    }
+                    "keybase-pb-descriptor" => content(results.get(), "text/plain", crate::keybase::descriptor()?.as_bytes()),
+                    _ => not_found(results.get()),
+                }
+                Ok(())
+            }.await;
+            if let Err(err) = action {
+                failure(results.get(), &err);
+            }
+            Ok(())
+        })
+    }
+    fn post(
+        &mut self,
+        params: web::PostParams,
+        mut results: web::PostResults,
+    ) -> Promise<(), capnp::Error> {
+        let registry = self.registry.clone();
+        let api = self.api;
+        let can_approve = self.can_approve;
+        let context = self.context.clone();
+        let platform = self.platform.clone();
+        Promise::from_future(async move {
+            let action: Result<()> = async {
+                let params = params.get()?;
+                let path = params.get_path()?.to_str()?;
+                let data = params.get_content()?;
+                ensure!(
+                    !data.has_encoding() || data.get_encoding()?.is_empty(),
+                    "encoded requests not accepted"
+                );
+                let body = data.get_content()?;
+                if api {
+                    match path {
+                        "upload" => {
+                            ensure!(
+                                body.len() as u64 <= crate::spk::SIZE_LIMIT,
+                                "upload too large"
+                            );
+                            let mut temp = registry.temporary()?;
+                            temp.write_all(body)?;
+                            registry.upload(temp.path())?;
+                            results.get().init_no_content();
+                        }
+                        "status" => content(
+                            results.get(),
+                            "application/octet-stream",
+                            &registry.submission(body)?,
+                        ),
+                        _ => not_found(results.get()),
+                    }
+                } else {
+                    ensure!(can_approve, "approval permission denied");
+                    if path == "reindex" {
+                        registry.publish()?;
+                        results.get().init_no_content();
+                    } else if path == "keybase-pb-token" {
+                        crate::keybase::claim(
+                            &registry,
+                            &context,
+                            &platform,
+                            std::str::from_utf8(body)?,
+                        )
+                        .await?;
+                        results.get().init_no_content();
+                    } else if let Some(fingerprint) = path.strip_prefix("keybase/") {
+                        let profile =
+                            crate::keybase::lookup(&registry, &platform, fingerprint).await?;
+                        content(
+                            results.get(),
+                            "application/json",
+                            &serde_json::to_vec(&profile)?,
+                        );
+                    } else if let Some((action, id)) = path.split_once('/') {
+                        registry.review(id, action, std::str::from_utf8(body)?)?;
+                        results.get().init_no_content();
+                    } else {
+                        not_found(results.get());
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(err) = action {
+                failure(results.get(), &err);
+            }
+            Ok(())
+        })
+    }
+    fn post_streaming(
+        &mut self,
+        params: web::PostStreamingParams,
+        mut results: web::PostStreamingResults,
+    ) -> Promise<(), capnp::Error> {
+        let result: Result<()> = (|| {
+            let params = params.get()?;
+            if !self.api || params.get_path()?.to_str()? != "upload" {
+                bail!("streaming only supports upload");
+            }
+            ensure!(
+                !params.has_encoding() || params.get_encoding()?.is_empty(),
+                "encoded uploads not accepted"
+            );
+            let size = params.get_expected_size();
+            ensure!(size <= crate::spk::SIZE_LIMIT, "upload too large");
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            let stream: web::request_stream::Client = capnp_rpc::new_client(Upload {
+                registry: self.registry.clone(),
+                file: Some(self.registry.temporary()?),
+                count: 0,
+                expected: (size != 0).then_some(size),
+                sender: Some(sender),
+                receiver: Some(receiver),
+            });
+            results.get().set_stream(stream);
+            Ok(())
+        })();
+        // Sandstorm retries /status as a buffered post when streaming isn't supported.
+        match result {
+            Ok(()) => Promise::ok(()),
+            Err(err) => Promise::err(capnp::Error::unimplemented(err.to_string())),
+        }
+    }
+}
+struct Upload {
+    registry: Registry,
+    file: Option<tempfile::NamedTempFile>,
+    count: u64,
+    expected: Option<u64>,
+    sender: Option<futures::channel::oneshot::Sender<std::result::Result<(), String>>>,
+    receiver: Option<futures::channel::oneshot::Receiver<std::result::Result<(), String>>>,
+}
+impl byte_stream::Server for Upload {
+    fn write(&mut self, params: byte_stream::WriteParams) -> Promise<(), capnp::Error> {
+        promise((|| {
+            let params = params.get()?;
+            let data = params.get_data()?;
+            let count = self
+                .count
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
+            ensure!(
+                count <= self.expected.unwrap_or(crate::spk::SIZE_LIMIT),
+                "upload exceeds expected size"
+            );
+            self.file
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("upload already finished"))?
+                .write_all(data)?;
+            self.count = count;
+            Ok(())
+        })())
+    }
+    fn expect_size(
+        &mut self,
+        params: byte_stream::ExpectSizeParams,
+        _: byte_stream::ExpectSizeResults,
+    ) -> Promise<(), capnp::Error> {
+        promise((|| {
+            let total = self
+                .count
+                .checked_add(params.get()?.get_size())
+                .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
+            ensure!(
+                total <= crate::spk::SIZE_LIMIT && self.expected.is_none_or(|v| v == total),
+                "invalid expected size"
+            );
+            self.expected = Some(total);
+            Ok(())
+        })())
+    }
+    fn done(
+        &mut self,
+        _: byte_stream::DoneParams,
+        _: byte_stream::DoneResults,
+    ) -> Promise<(), capnp::Error> {
+        let result: Result<()> = (|| {
+            let file = self
+                .file
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("upload already finished"))?;
+            ensure!(
+                self.expected.is_none_or(|v| v == self.count),
+                "incomplete upload"
+            );
+            self.registry.upload(file.path())?;
+            Ok(())
+        })();
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
+        promise(result)
+    }
+}
+impl web::request_stream::Server for Upload {
+    fn get_response(
+        &mut self,
+        _: web::request_stream::GetResponseParams,
+        mut results: web::request_stream::GetResponseResults,
+    ) -> Promise<(), capnp::Error> {
+        let receiver = self.receiver.take();
+        Promise::from_future(async move {
+            let result = receiver
+                .ok_or_else(|| error("getResponse already called"))?
+                .await
+                .map_err(error)?;
+            match result {
+                Ok(()) => {
+                    results.get().init_no_content();
+                }
+                Err(err) => failure(results.get(), &anyhow::anyhow!(err)),
+            }
+            Ok(())
+        })
+    }
+}
+pub fn content(mut response: web::response::Builder<'_>, mime: &str, bytes: &[u8]) {
+    let mut content = response.reborrow().init_content();
+    content.set_mime_type(mime);
+    content.init_body().set_bytes(bytes);
+}
+fn failure(mut response: web::response::Builder<'_>, err: &anyhow::Error) {
+    let mut output = response.reborrow().init_client_error();
+    output.set_status_code(web::response::ClientErrorCode::BadRequest);
+    output.set_description_html(
+        err.to_string()
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .as_str(),
+    );
+}
+fn not_found(mut response: web::response::Builder<'_>) {
+    let mut output = response.reborrow().init_client_error();
+    output.set_status_code(web::response::ClientErrorCode::NotFound);
+    output.set_description_html("Not found");
+}

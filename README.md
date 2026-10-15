@@ -1,35 +1,162 @@
-# sandstorm-marketplace
+# Sandstorm Marketplace
 
-Rust workspace for a replacement Sandstorm app marketplace.
+A Rust Sandstorm grain that receives signed SPK submissions, provides a private
+review UI, and publishes a static marketplace through Sandstorm Web Publishing.
 
-Current layout:
+```text
+spk publish --webkey … ── ApiSession ──┐
+                                     ├─ verification + submission state
+Private grain UI ── review/approval ──┘
+                                              │
+                                      rebuild private catalog
+                                              │
+                                      generate static website
+                                              │
+                                  atomically replace /var/www
+                                              │
+                                     Sandstorm Web Publishing
+```
 
-- `crates/marketplace-model`: shared JSON/domain models for Sandstorm app-index exports.
-- `crates/marketplace-web`: Axum + Askama server-rendered marketplace.
-- `crates/marketplace-sync`: import/sync utilities for fixture or remote app-index data.
-- `fixtures/app-index`: local fixture data matching the existing Sandstorm export shape.
+Public browsing does not need a running application process. Search and category
+filters run in the browser. Installation links preserve Sandstorm's `?host=`
+parameter and direct users back to their server with the public SPK URL.
+Without a host parameter, Install asks for a Sandstorm server URL.
 
-## Run the web app
+## Build and package
+
+Requires Linux, Rust/Cargo, the Cap'n Proto schema compiler (`capnp` on PATH, or
+set `CAPNP`), and `ldd` for staging system runtime libraries. Application code,
+SPK signature verification, compression, packaging, and test orchestration are
+Rust. No Python, C++ application backend, Sandstorm SDK, `xz`, or GnuPG is needed
+for normal builds or runtime. Browser interfaces use HTML and JavaScript.
+
+```bash
+cargo xtask package --contact-email you@example.com
+# Equivalent optional Make wrapper:
+make package CONTACT_EMAIL=you@example.com
+```
+
+The result is `build/marketplace.spk`. The Rust packager builds the grain, stages
+its executable and shared system libraries, constructs the manifest, and signs
+and compresses the SPK. A signing identity is created in
+`.local/marketplace.keyring`, with its app ID in `.local/app-id`. Keep both files
+for future updates; they are ignored by Git and excluded from the package.
+Existing SDK-format signing keys are preserved. An incomplete or mismatched
+identity causes packaging to fail instead of silently changing the app ID.
+
+The default contact address is a placeholder for local development. Set a real
+address before distributing the package. Increment `APP_VERSION` and update
+`MARKETING_VERSION` in `xtask/src/package.rs` for releases.
+
+## Use in Sandstorm
+
+1. Install `build/marketplace.spk` and create a marketplace grain.
+2. Open its administration UI. The public marketplace URL is displayed there;
+   this also allocates the grain's Web Publishing address.
+3. Use Sandstorm's Share access menu to create an API token with the **submitter**
+   role. Authors publish using the resulting webkey:
+
+   ```bash
+   spk publish --webkey 'https://YOUR-API-HOST/#TOKEN' your-app.spk
+   ```
+
+4. Review and approve the submission in the grain. Approved packages whose
+   authors requested publication appear in the main catalog and public website.
+
+The **reviewer** role can inspect submissions; **approver** can approve, reject,
+and rebuild the catalog. Submission access alone does not grant review access.
+`spk publish --status`, `--embargo`, and `--remove` retain their existing meanings.
+Pending packages requested for publication appear in `experimental/index.json`
+and have public downloads; embargoed packages do not. Unapproval moves a release
+back to experimental; rejection or author withdrawal removes it from public
+output. Older still-published versions remain downloadable.
+
+To use this marketplace for a Sandstorm installation, set its App Market URL
+and App Index URL to the public site URL in the server's configuration.
+
+```text
+/                         marketplace listing
+/app/<appId>/             static app detail page
+/apps/index.json          approved app summaries
+/apps/<appId>.json         app details
+/experimental/index.json  pending publication requests
+/images/<imageId>          icons and screenshots
+/packages/<packageId>      signed SPK downloads
+```
+
+## Development
+
+- `crates/marketplace-grain`: Rust Cap'n Proto RPC server, SPK verification,
+  submission protocol, persistent registry, and private review UI. Vendored
+  protocol definitions are documented in [UPSTREAM.md](crates/marketplace-grain/UPSTREAM.md).
+- `crates/marketplace-model`: shared catalog JSON types.
+- `crates/marketplace-web`: static publisher library and standalone preview server.
+- `crates/marketplace-sync`: mirror/import tools for catalog development.
+- `xtask`: Rust package builder and compatibility-test runner.
+
+The grain stores packages and submission state under `/var/packages`, builds a
+private catalog under `/var/catalog`, and calls the publisher library after state
+changes. The publisher stages a complete replacement next to `/var/www`, then
+uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations. Failed rendering
+leaves the previous site intact. Retrying the operation, clicking **reindex**, or
+restarting the grain rebuilds from persisted state. Regeneration is synchronous
+and serialized; this implementation rebuilds the full site per change.
+Static output is a snapshot: a browser spanning two publications can still see
+a removed resource disappear between requests.
+
+Preview the fixtures (demo SPK files are placeholders, not installable apps):
 
 ```bash
 cargo run -p marketplace-web
+# http://127.0.0.1:9938
 ```
 
-The server defaults to `http://127.0.0.1:9938` and reads fixture data from `fixtures/app-index`.
-
-## Run the sync stub
+Generate a static preview:
 
 ```bash
-cargo run -p marketplace-sync -- --database-url sqlite://marketplace.db sync-fixtures
+cargo run -p marketplace-web -- publish --source fixtures/app-index --output build/public
 ```
 
-## Mirror the live Sandstorm app index
+Mirror the existing public catalog for preview:
 
 ```bash
 cargo run -p marketplace-sync -- sync-remote --output-dir data/app-index
 MARKETPLACE_PACKAGE_BASE_URL=https://app-index.sandstorm.io/packages \
-cargo run -p marketplace-web
+  cargo run -p marketplace-web
 ```
 
-`sync-remote` downloads the published app list, per-app detail JSON, and referenced image assets from `https://app-index.sandstorm.io`.
-If `data/app-index` exists, the web app will use it automatically; otherwise it falls back to `fixtures/app-index`.
+The mirror downloads JSON and images, not SPKs or private approval/signing state.
+It is not a migration of an authoritative registry. For a complete static export,
+the input catalog must contain the referenced SPKs as well. To migrate the old
+index grain, restore its private `/var/packages`, `/var/apps`, and `/var/keybase`
+data (and optional `/var/descriptions` and `/var/keybase-token`) into the new
+grain's storage; startup reconstructs public output. Live migration and server
+installation are separate from building the package.
+
+The older `sync-fixtures` SQLite import remains available for development;
+`marketplace.db` is not used by the grain or static publisher.
+
+## Validation
+
+```bash
+cargo test --workspace
+node --test tests/frontend.cjs
+# After packaging; requires Bubblewrap:
+cargo xtask test-package
+# Optional independent compatibility check; requires the old SDK and GnuPG:
+cargo xtask test-interop --spk ~/src/sandstorm/build/dev/bin/spk
+```
+
+Rust tests exercise signed submissions, API permissions, streaming uploads,
+embargo, approval, publication, replay rejection, withdrawal, restart, and a real
+grain process connected over RPC fd 3. Publication tests check rollback and
+stale-file removal. Node tests exercise the browser JavaScript.
+
+The package smoke test boots the staged runtime in Bubblewrap with disposable
+storage and no host runtime libraries. The optional compatibility runner compares
+Rust verification against SDK-generated packages with GnuPG author proofs, runs
+the actual `spk publish` client, and asks the SDK to verify the Rust-built package
+when available. The SDK and GnuPG serve only as independent test references.
+
+The legacy `spk publish` wire protocol retains its existing unverified webkey-hash
+field. This app does not send notification emails to the old Sandstorm administrators.
