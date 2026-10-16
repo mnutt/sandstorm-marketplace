@@ -4,191 +4,40 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sandstorm Marketplace</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #eeedf3;
-        --panel: #f8f8fc;
-        --ink: #1d1b28;
-        --muted: #66627a;
-        --accent: #4f2f8f;
-        --line: #d7d3e4;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", sans-serif;
-        background:
-          radial-gradient(circle at top, rgba(79, 47, 143, 0.12) 0, transparent 26rem),
-          linear-gradient(180deg, #f6f5fa 0%, var(--bg) 100%);
-        color: var(--ink);
-      }
-      main { width: 100%; margin: 0 auto; padding: 2.3rem 1.5rem 3rem; }
-      .masthead {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 1rem;
-      }
-      .title-block {
-        min-width: 0;
-      }
-      h1 { font-size: clamp(1.85rem, 4vw, 2.9rem); line-height: 1; margin: 0; max-width: 12ch; }
-      p.lede { max-width: 38rem; color: var(--muted); font-size: 0.9rem; line-height: 1.48; }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
-        gap: 0.95rem;
-        margin-top: 1.75rem;
-      }
-      .tag-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.55rem;
-        margin-top: 1.1rem;
-      }
-      .toolbar {
-        display: grid;
-        gap: 0.8rem;
-        margin-top: 1.1rem;
-      }
-      [hidden] { display: none !important; }
-      .search-form {
-        display: flex;
-        justify-content: flex-end;
-        flex: 0 0 auto;
-        min-width: 16rem;
-      }
-      .search {
-        width: min(28rem, 100%);
-        padding: 0.62rem 0.8rem;
-        border: 1px solid var(--line);
-        border-radius: 0.2rem;
-        background: rgba(248, 248, 252, 0.96);
-        color: var(--ink);
-        font-size: 0.9rem;
-      }
-      .search::placeholder {
-        color: var(--muted);
-      }
-      .tag {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.34rem 0.58rem;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        background: rgba(248, 248, 252, 0.96);
-        color: var(--muted);
-        text-decoration: none;
-        font-size: 0.76rem;
-      }
-      .tag strong {
-        color: var(--ink);
-        font-weight: 600;
-      }
-      .tag.selected {
-        border-color: #4f2f8f;
-        background: #4f2f8f;
-        color: #f8f6ff;
-        box-shadow: 0 0 0 1px rgba(79, 47, 143, 0.12);
-      }
-      .tag.selected strong {
-        color: #f8f6ff;
-      }
-      @media (max-width: 48rem) {
-        .masthead {
-          flex-direction: column;
-        }
-        .search-form {
-          width: 100%;
-          min-width: 0;
-          justify-content: flex-start;
-        }
-        .search {
-          width: 100%;
-        }
-      }
-      article {
-        display: flex;
-        flex-direction: column;
-        background: rgba(248, 248, 252, 0.96);
-        border: 1px solid var(--line);
-        border-radius: 0.2rem;
-        padding: 0.9rem;
-        box-shadow: 0 0.9rem 1.8rem rgba(55, 49, 79, 0.08);
-      }
-      img { width: 2.9rem; height: 2.9rem; object-fit: cover; border-radius: 0.15rem; }
-      a { color: inherit; text-decoration: none; }
-      a.card-link {
-        display: block;
-        flex: 1;
-      }
-      h2 { margin: 0.65rem 0 0.18rem; font-size: 0.98rem; line-height: 1.08; }
-      .meta { color: var(--muted); font-size: 0.8rem; margin: 0; }
-      .desc { margin: 0.72rem 0 0; line-height: 1.42; min-height: 2.7em; font-size: 0.9rem; }
-      .actions {
-        margin-top: 0.8rem;
-      }
-      .button {
-        display: block;
-        width: 100%;
-        padding: 0.42rem 0.6rem;
-        border-radius: 0.15rem;
-        background: #f1eef9;
-        color: var(--accent);
-        text-decoration: none;
-        font-size: 0.8rem;
-        border: 1px solid var(--line);
-        text-align: center;
-      }
-    </style>
+    <link rel="stylesheet" href="/assets/marketplace.css">
+    <link rel="icon" href="/assets/favicon.png" type="image/png">
   </head>
   <body>
+    <header class="masthead">
+      {% include "brand.html" %}
+      {% include "categories.html" %}
+      <form class="search-form" action="{{ search_action }}" method="get">
+        <input
+          class="search"
+          type="search"
+          name="q"
+          value="{{ search }}"
+          placeholder="Search apps"
+          aria-label="Search apps"
+        >
+        <button class="search-submit" type="submit" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="m15 15 6 6"/></svg></button>
+      </form>
+    </header>
+    <section class="welcome" id="welcome"{% if !show_welcome %} hidden{% endif %}><p><strong>Sandstorm</strong> is a self-hostable web productivity suite.</p></section>
+    <p class="intro">Install any of the apps below with just one click.</p>
     <main>
-      <div class="masthead">
-        <div class="title-block">
-          <h1>Sandstorm App Marketplace</h1>
-          <p class="lede">
-            Install any of the apps below with just one click.
-          </p>
-        </div>
-        <form class="search-form" action="/" method="get">
-          {% for tag in tags %}
-          {% if tag.selected && tag.name != "All" %}
-          <input type="hidden" name="tag" value="{{ tag.name }}">
-          {% endif %}
-          {% endfor %}
-          <input
-            class="search"
-            type="search"
-            name="q"
-            value="{{ search }}"
-            placeholder="Search apps, categories, or authors"
-            aria-label="Search apps"
-          >
-        </form>
-      </div>
-      <div class="toolbar">
-        <nav class="tag-row" aria-label="Categories">
-          {% for tag in tags %}
-          <a data-tag="{{ tag.name }}" class="tag{% if tag.selected %} selected{% endif %}" href="{{ tag.href }}">
-            <strong>{{ tag.name }}</strong>
-            <span>{{ tag.count }}</span>
-          </a>
-          {% endfor %}
-        </nav>
-      </div>
-      <section class="grid">
+      <h1 class="catalog-title" id="catalog-title">{% for tag in tags %}{% if tag.selected %}{% if tag.name == "All" %}All Apps{% else %}{{ tag.name }}{% endif %}{% endif %}{% endfor %}</h1>
+      <section class="grid" aria-labelledby="catalog-title">
         {% for listing in apps %}
         <article data-categories="{{ listing.categories_json }}" data-search="{{ listing.search_text }}">
           <a class="card-link" href="/app/{{ listing.app.app_id }}/">
             {% if !listing.app.image_id.is_empty() %}
-            <img src="/images/{{ listing.app.image_id }}" alt="">
+            <img class="app-icon" src="/images/{{ listing.app.image_id }}" alt="" loading="lazy">
+            {% else %}
+            <span class="app-icon icon-placeholder" aria-hidden="true"></span>
             {% endif %}
-            <h2>{{ listing.app.name }}</h2>
-            <p class="meta">v{{ listing.app.version }} · {{ listing.app.created_at }}</p>
-            <p class="desc">{{ listing.app.short_description }}</p>
+            <h2 title="{{ listing.app.name }}">{{ listing.app.name }}</h2>
+            <p class="desc" title="{{ listing.app.short_description }}">{{ listing.app.short_description }}</p>
           </a>
           <div class="actions">
             <a class="button" data-install data-package-id="{{ listing.app.package_id }}" href="{{ listing.package_url }}">Install</a>

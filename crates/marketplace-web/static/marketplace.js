@@ -17,13 +17,23 @@ function matchesApp(searchText, categories, query, tag) {
   return (!tag || categories.includes(tag)) && searchText.toLowerCase().includes(query.toLowerCase());
 }
 
-if (typeof module !== "undefined") module.exports = { serverOrigin, installUrl, matchesApp };
+function categoryFromPath(pathname) {
+  const match = /^\/genre\/([^/]+)\/?$/.exec(pathname);
+  if (!match) return "";
+  try { return decodeURIComponent(match[1]); } catch { return ""; }
+}
+
+if (typeof module !== "undefined") module.exports = { serverOrigin, installUrl, matchesApp, categoryFromPath };
 
 if (typeof document !== "undefined") (() => {
   const params = new URLSearchParams(location.search);
   let host = serverOrigin(params.get("host"));
   const query = params.get("q") || "";
-  const tag = params.get("tag") || "";
+  const tag = categoryFromPath(location.pathname);
+  const welcome = document.getElementById("welcome");
+  if (welcome) welcome.hidden = Boolean(tag || query);
+  const title = document.getElementById("catalog-title");
+  if (title) title.textContent = query ? `Search results for “${query}”` : (tag || "All Apps");
   const cards = document.querySelectorAll("article[data-search]");
   let visible = 0;
   cards.forEach(card => {
@@ -42,11 +52,6 @@ if (typeof document !== "undefined") (() => {
     link.href = url.href;
   });
   document.querySelectorAll("form.search-form").forEach(form => {
-    if (tag && !form.querySelector('[name="tag"]')) {
-      const field = document.createElement("input");
-      field.type = "hidden"; field.name = "tag"; field.value = tag;
-      form.append(field);
-    }
     if (host) {
       const field = document.createElement("input");
       field.type = "hidden"; field.name = "host"; field.value = host;
@@ -56,7 +61,7 @@ if (typeof document !== "undefined") (() => {
   // Carry the user's server through category links, app pages, and back links.
   if (host) document.querySelectorAll('a[href]').forEach(link => {
     const url = new URL(link.href);
-    if (url.origin === location.origin && (url.pathname === "/" || url.pathname.startsWith("/app/"))) {
+    if (url.origin === location.origin && (url.pathname === "/" || url.pathname.startsWith("/app/") || url.pathname.startsWith("/genre/"))) {
       url.searchParams.set("host", host);
       link.href = url.href;
     }

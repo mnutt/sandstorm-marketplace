@@ -88,6 +88,8 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
         )?;
     }
     let template = HomeTemplate {
+        show_welcome: true,
+        search_action: "/".to_string(),
         tags: build_tag_chips(&index, None, ""),
         apps: index
             .index
@@ -102,6 +104,39 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
         include_str!("../static/marketplace.js"),
     )?;
     write(&stage.join("index.html"), template.render()?)?;
+    for tag in template.tags.iter().filter(|tag| tag.name != "All") {
+        // These names become actual directory components, not URL-encoded filenames.
+        ensure!(
+            !tag.name.is_empty()
+                && tag.name != "."
+                && tag.name != ".."
+                && !tag.name.contains(['/', '\\', '\0']),
+            "invalid category name"
+        );
+        let directory = stage.join("genre").join(&tag.name);
+        fs::create_dir_all(&directory)?;
+        let category = HomeTemplate {
+            show_welcome: false,
+            search_action: crate::home_href(Some(&tag.name), ""),
+            tags: build_tag_chips(&index, Some(&tag.name), ""),
+            apps: index
+                .index
+                .apps
+                .iter()
+                .filter(|app| app.categories.contains(&tag.name))
+                .map(|app| listing(app, "/packages"))
+                .collect(),
+            search: String::new(),
+        };
+        write(&directory.join("index.html"), category.render()?)?;
+    }
+    if stage.join("genre").exists() {
+        fs::File::open(stage.join("genre"))?.sync_all()?;
+    }
+    fs::create_dir(stage.join("assets"))?;
+    for asset in crate::assets::ASSETS {
+        write(&stage.join("assets").join(asset.name), asset.bytes)?;
+    }
     if stage.join("app").exists() {
         fs::File::open(stage.join("app"))?.sync_all()?;
     }
@@ -226,7 +261,20 @@ mod tests {
         publish(&source, &output)?;
         let original = fs::read(output.join("index.html"))?;
         assert!(String::from_utf8_lossy(&original).contains("Etherpad"));
+        assert!(String::from_utf8_lossy(&original).contains("/assets/marketplace.css"));
+        for asset in crate::assets::ASSETS {
+            assert_eq!(
+                fs::read(output.join("assets").join(asset.name))?,
+                asset.bytes
+            );
+        }
         assert!(output.join("packages/pkg-etherpad-0001").is_file());
+        let category = fs::read_to_string(output.join("genre/Collaboration/index.html"))?;
+        assert!(category.contains("<h2 title=\"Etherpad\">"));
+        assert!(!category.contains("<h2 title=\"Wekan\">"));
+        assert!(category.contains("action=\"/genre/Collaboration\""));
+        assert!(category.contains("id=\"welcome\" hidden"));
+        assert!(!category.contains("?tag="));
         let app_id = LoadedAppIndex::load(&source)?.index.apps[0].app_id.clone();
         assert!(output.join(format!("app/{app_id}/index.html")).is_file());
         fs::remove_file(source.join("packages/pkg-etherpad-0001"))?;
@@ -240,6 +288,7 @@ mod tests {
         fs::write(source.join("apps/index.json"), r#"{"apps":[]}"#)?;
         publish(&source, &output)?;
         assert!(!output.join("app").exists());
+        assert!(!output.join("genre").exists());
         assert!(!output.join("packages/pkg-etherpad-0001").exists());
         Ok(())
     }

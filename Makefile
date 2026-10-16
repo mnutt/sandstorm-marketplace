@@ -1,7 +1,10 @@
 SANDSTORM_SPK ?= $(HOME)/src/sandstorm/build/dev/bin/spk
 CONTACT_EMAIL ?= maintainer@example.invalid
 
-.PHONY: build package test test-package test-interop
+.PHONY: build package prepare-dev test test-package test-interop
+prepare-dev:
+	cargo xtask prepare-dev
+
 build:
 	cargo build --release -p marketplace-grain -p marketplace-web
 

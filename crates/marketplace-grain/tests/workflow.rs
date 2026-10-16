@@ -302,6 +302,23 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
     use futures::AsyncReadExt;
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
     use tokio_util::compat::TokioAsyncReadCompatExt;
+    struct Wake;
+    impl marketplace_grain::util_capnp::handle::Server for Wake {}
+    struct Platform;
+    impl marketplace_grain::grain_capnp::sandstorm_api::Server<capnp::any_pointer::Owned> for Platform {
+        fn stay_awake(
+            &mut self,
+            _: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeParams<
+                capnp::any_pointer::Owned,
+            >,
+            mut results: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeResults<
+                capnp::any_pointer::Owned,
+            >,
+        ) -> capnp::capability::Promise<(), capnp::Error> {
+            results.get().set_handle(capnp_rpc::new_client(Wake));
+            capnp::capability::Promise::ok(())
+        }
+    }
     struct Child(std::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
@@ -315,7 +332,12 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
             let (parent, child) = std::os::unix::net::UnixStream::pair()?;
             let fd = child.as_raw_fd();
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_marketplace-grain"));
-            command.arg("--init").env("MARKETPLACE_ROOT", dir.path());
+            command
+                .arg("--init")
+                .env("MARKETPLACE_ROOT", dir.path())
+                // SPK verification must use registry scratch storage, even when
+                // the process-wide temporary directory is unavailable.
+                .env("TMPDIR", dir.path().join("unavailable-system-tmp"));
             unsafe {
                 command.pre_exec(move || {
                     if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
@@ -329,7 +351,10 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
             parent.set_nonblocking(true)?;
             let (read, write) = tokio::net::UnixStream::from_std(parent)?.compat().split();
             let network = twoparty::VatNetwork::new(read, write, Side::Server, Default::default());
-            let mut rpc = RpcSystem::new(Box::new(network), None);
+            let platform: marketplace_grain::grain_capnp::sandstorm_api::Client<
+                capnp::any_pointer::Owned,
+            > = capnp_rpc::new_client(Platform);
+            let mut rpc = RpcSystem::new(Box::new(network), Some(platform.client));
             let view: ui_view::Client = rpc.bootstrap(Side::Client);
             let task = tokio::task::spawn_local(rpc);
             let work = async {
@@ -367,4 +392,182 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
             result
         })
         .await
+}
+
+fn import_bundle(corrupt: bool) -> anyhow::Result<Vec<u8>> {
+    let source = tempfile::tempdir()?;
+    let registry = Registry::new(source.path().to_owned())?;
+    let first = upload(&registry, 1);
+    registry.set_state(&first, s::SubmissionState::Publish, 1)?;
+    registry.review(&first, "approve", "")?;
+    let second = upload(&registry, 2);
+    registry.set_state(&second, s::SubmissionState::Publish, 1)?;
+    registry.publish()?;
+    let mut archive = tar::Builder::new(Vec::new());
+    for name in ["apps/index.json", "experimental/index.json"] {
+        archive.append_path_with_name(source.path().join("catalog").join(name), name)?;
+    }
+    for (i, id) in [first, second].into_iter().enumerate() {
+        let mut bytes = std::fs::read(registry.package_dir(&id)?.join("spk"))?;
+        if corrupt && i == 1 {
+            bytes[0] ^= 1;
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append_data(&mut header, format!("packages/{id}"), bytes.as_slice())?;
+    }
+    Ok(archive.into_inner()?)
+}
+
+#[test]
+fn catalog_import_is_atomic_and_empty_only() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    registry.publish()?;
+    let before = std::fs::read(dir.path().join("www/apps/index.json"))?;
+    let mut file = registry.temporary()?;
+    file.write_all(&import_bundle(true)?)?;
+    assert!(registry.import_catalog(file.path()).is_err());
+    assert!(registry.package_ids()?.is_empty());
+    assert_eq!(
+        before,
+        std::fs::read(dir.path().join("www/apps/index.json"))?
+    );
+    // Symlinks must never be extracted, even if their target is inside the archive.
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    archive.append_link(&mut header, "packages/link", "/etc/passwd")?;
+    let mut link = registry.temporary()?;
+    link.write_all(&archive.into_inner()?)?;
+    assert!(registry.import_catalog(link.path()).is_err());
+    let mut valid = registry.temporary()?;
+    valid.write_all(&import_bundle(false)?)?;
+    registry.import_catalog(valid.path())?;
+    assert_eq!(registry.package_ids()?.len(), 2);
+    let main: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("www/apps/index.json"))?)?;
+    let experimental: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        dir.path().join("www/experimental/index.json"),
+    )?)?;
+    assert_eq!(main["apps"][0]["versionNumber"], 1);
+    assert_eq!(experimental["apps"][0]["versionNumber"], 2);
+    assert!(registry.import_catalog(valid.path()).is_err());
+    let reopened = Registry::new(dir.path().to_owned())?;
+    reopened.publish()?;
+    assert_eq!(reopened.package_ids()?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catalog_import_permissions_and_streaming_race() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let view: ui_view::Client = capnp_rpc::new_client(View {
+        registry: registry.clone(),
+        platform: Rc::new(RefCell::new(None)),
+    });
+    let admin = session(&view, &[true, true, false], false).await?;
+    let reviewer = session(&view, &[false, true, false], false).await?;
+    let api = session(&view, &[false, false, true], true).await?;
+    let bundle = import_bundle(false)?;
+    for client in [&reviewer, &api] {
+        assert!(matches!(
+            post(client, "import", &bundle).await?.get()?.which()?,
+            web::response::ClientError(_)
+        ));
+        let mut call = client.post_streaming_request();
+        call.get().set_path("import");
+        assert!(call.send().promise.await.is_err());
+    }
+    let mut call = admin.post_streaming_request();
+    call.get().set_path("import");
+    call.get().set_expected_size(bundle.len() as u64);
+    let stream = call.send().promise.await?.get()?.get_stream()?;
+    let response = stream.get_response_request().send().promise;
+    let bytes: byte_stream::Client = cast(stream);
+    let mut write = bytes.write_request();
+    write.get().set_data(&bundle);
+    write.send().await?;
+    // Another upload wins while this import's body is in flight.
+    upload(&registry, 3);
+    assert!(bytes.done_request().send().promise.await.is_err());
+    assert!(matches!(
+        response.await?.get()?.which()?,
+        web::response::ClientError(_)
+    ));
+    assert_eq!(registry.package_ids()?.len(), 1);
+    assert!(matches!(
+        post(&admin, "import", &bundle).await?.get()?.which()?,
+        web::response::ClientError(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn streamed_catalog_import_disables_admin_import() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let view: ui_view::Client = capnp_rpc::new_client(View {
+        registry: registry.clone(),
+        platform: Rc::new(RefCell::new(None)),
+    });
+    let admin = session(&view, &[true, true, false], false).await?;
+    let bundle = import_bundle(false)?;
+    let mut call = admin.post_streaming_request();
+    call.get().set_path("import");
+    call.get().set_expected_size(bundle.len() as u64);
+    let stream = call.send().promise.await?.get()?.get_stream()?;
+    let response = stream.get_response_request().send().promise;
+    let bytes: byte_stream::Client = cast(stream);
+    for chunk in bundle.chunks(1024) {
+        let mut write = bytes.write_request();
+        write.get().set_data(chunk);
+        write.send().await?;
+    }
+    bytes.done_request().send().promise.await?;
+    assert!(matches!(
+        response.await?.get()?.which()?,
+        web::response::NoContent(_)
+    ));
+    assert_eq!(registry.package_ids()?.len(), 2);
+    let mut status = admin.get_request();
+    status.get().set_path("import-status");
+    let response = status.send().promise.await?;
+    let web::response::Content(content) = response.get()?.which()? else {
+        panic!("expected JSON");
+    };
+    let web::response::content::body::Bytes(body) = content.get_body().which()? else {
+        panic!("expected bytes");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(body?)?,
+        serde_json::json!({"available": false})
+    );
+    Ok(())
+}
+
+/// Exercise a real synced tarball without installing or modifying a live grain.
+#[test]
+#[ignore = "set MARKETPLACE_IMPORT_TARBALL to a synced catalog tarball"]
+fn real_catalog_tarball_import() -> anyhow::Result<()> {
+    let path = std::env::var_os("MARKETPLACE_IMPORT_TARBALL")
+        .ok_or_else(|| anyhow::anyhow!("set MARKETPLACE_IMPORT_TARBALL"))?;
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    registry.import_catalog(std::path::Path::new(&path))?;
+    let ids = registry.package_ids()?;
+    assert!(!ids.is_empty());
+    for id in &ids {
+        assert!(dir.path().join("www/packages").join(id).is_file());
+    }
+    println!(
+        "Verified and published {} packages from the real catalog tarball",
+        ids.len()
+    );
+    Ok(())
 }

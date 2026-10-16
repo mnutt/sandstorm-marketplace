@@ -15,6 +15,8 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Task {
+    /// Build and stage a debug grain for spk dev (no signing key required).
+    PrepareDev,
     /// Build, stage, and sign the marketplace SPK using Rust.
     Package {
         #[arg(long, default_value = "maintainer@example.invalid")]
@@ -60,6 +62,7 @@ fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     std::env::set_current_dir(root)?;
     match Args::parse().command {
+        Task::PrepareDev => package::prepare_dev(root),
         Task::Package {
             contact_email,
             debug,

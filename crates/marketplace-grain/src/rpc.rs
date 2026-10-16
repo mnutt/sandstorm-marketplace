@@ -89,6 +89,7 @@ impl web::Server for Session {
         let registry = self.registry.clone();
         let context = self.context.clone();
         let api = self.api;
+        let can_approve = self.can_approve;
         Promise::from_future(async move {
             let action: Result<()> = async {
                 ensure!(!api, "submission API does not expose administration");
@@ -96,6 +97,7 @@ impl web::Server for Session {
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
                     "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
+                    "import-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"available": can_approve && !registry.is_busy() && registry.package_ids()?.is_empty()}))?),
                     "public-id" => {
                         let response = context.get_public_id_request().send().promise.await?; let response = response.get()?;
                         let body = serde_json::json!({"publicId": response.get_public_id()?.to_str()?, "hostname": response.get_hostname()?.to_str()?, "autoUrl": response.get_auto_url()?.to_str()?, "isDemoUser": response.get_is_demo_user()});
@@ -132,6 +134,7 @@ impl web::Server for Session {
                     "encoded requests not accepted"
                 );
                 let body = data.get_content()?;
+                let operation = registry.begin_operation()?;
                 if api {
                     match path {
                         "upload" => {
@@ -141,7 +144,14 @@ impl web::Server for Session {
                             );
                             let mut temp = registry.temporary()?;
                             temp.write_all(body)?;
-                            registry.upload(temp.path())?;
+                            crate::work::upload(
+                                registry.clone(),
+                                platform.clone(),
+                                operation,
+                                temp,
+                                false,
+                            )
+                            .await?;
                             results.get().init_no_content();
                         }
                         "status" => content(
@@ -153,7 +163,27 @@ impl web::Server for Session {
                     }
                 } else {
                     ensure!(can_approve, "approval permission denied");
-                    if path == "reindex" {
+                    if path == "import" {
+                        ensure!(
+                            registry.package_ids()?.is_empty(),
+                            "import is only available in an empty grain"
+                        );
+                        ensure!(
+                            body.len() as u64 <= crate::import::IMPORT_LIMIT,
+                            "import too large"
+                        );
+                        let mut temp = registry.temporary()?;
+                        temp.write_all(body)?;
+                        crate::work::upload(
+                            registry.clone(),
+                            platform.clone(),
+                            operation,
+                            temp,
+                            true,
+                        )
+                        .await?;
+                        results.get().init_no_content();
+                    } else if path == "reindex" {
                         registry.publish()?;
                         results.get().init_no_content();
                     } else if path == "keybase-pb-token" {
@@ -196,20 +226,39 @@ impl web::Server for Session {
     ) -> Promise<(), capnp::Error> {
         let result: Result<()> = (|| {
             let params = params.get()?;
-            if !self.api || params.get_path()?.to_str()? != "upload" {
-                bail!("streaming only supports upload");
+            let path = params.get_path()?.to_str()?;
+            let import = !self.api && path == "import";
+            if import {
+                ensure!(self.can_approve, "approval permission denied");
+                ensure!(
+                    self.registry.package_ids()?.is_empty(),
+                    "import is only available in an empty grain"
+                );
+            } else if !self.api || path != "upload" {
+                bail!("unsupported streaming endpoint");
             }
+            let limit = if import {
+                crate::import::IMPORT_LIMIT
+            } else {
+                crate::spk::SIZE_LIMIT
+            };
             ensure!(
                 !params.has_encoding() || params.get_encoding()?.is_empty(),
                 "encoded uploads not accepted"
             );
             let size = params.get_expected_size();
-            ensure!(size <= crate::spk::SIZE_LIMIT, "upload too large");
+            ensure!(size <= limit, "upload too large");
+            tracing::info!(import, expected_bytes = size, "Upload stream opened");
             let (sender, receiver) = futures::channel::oneshot::channel();
             let stream: web::request_stream::Client = capnp_rpc::new_client(Upload {
                 registry: self.registry.clone(),
+                platform: self.platform.clone(),
                 file: Some(self.registry.temporary()?),
                 count: 0,
+                import,
+                limit,
+                started: std::time::Instant::now(),
+                last_progress: std::time::Instant::now(),
                 expected: (size != 0).then_some(size),
                 sender: Some(sender),
                 receiver: Some(receiver),
@@ -226,8 +275,13 @@ impl web::Server for Session {
 }
 struct Upload {
     registry: Registry,
+    platform: PlatformSlot,
     file: Option<tempfile::NamedTempFile>,
     count: u64,
+    import: bool,
+    limit: u64,
+    started: std::time::Instant,
+    last_progress: std::time::Instant,
     expected: Option<u64>,
     sender: Option<futures::channel::oneshot::Sender<std::result::Result<(), String>>>,
     receiver: Option<futures::channel::oneshot::Receiver<std::result::Result<(), String>>>,
@@ -242,7 +296,7 @@ impl byte_stream::Server for Upload {
                 .checked_add(data.len() as u64)
                 .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
             ensure!(
-                count <= self.expected.unwrap_or(crate::spk::SIZE_LIMIT),
+                count <= self.expected.unwrap_or(self.limit),
                 "upload exceeds expected size"
             );
             self.file
@@ -250,6 +304,10 @@ impl byte_stream::Server for Upload {
                 .ok_or_else(|| anyhow::anyhow!("upload already finished"))?
                 .write_all(data)?;
             self.count = count;
+            if self.last_progress.elapsed() >= std::time::Duration::from_secs(5) {
+                tracing::info!(import = self.import, bytes = count, expected_bytes = ?self.expected, elapsed_secs = self.started.elapsed().as_secs(), "Upload progress");
+                self.last_progress = std::time::Instant::now();
+            }
             Ok(())
         })())
     }
@@ -264,7 +322,7 @@ impl byte_stream::Server for Upload {
                 .checked_add(params.get()?.get_size())
                 .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
             ensure!(
-                total <= crate::spk::SIZE_LIMIT && self.expected.is_none_or(|v| v == total),
+                total <= self.limit && self.expected.is_none_or(|v| v == total),
                 "invalid expected size"
             );
             self.expected = Some(total);
@@ -276,22 +334,44 @@ impl byte_stream::Server for Upload {
         _: byte_stream::DoneParams,
         _: byte_stream::DoneResults,
     ) -> Promise<(), capnp::Error> {
-        let result: Result<()> = (|| {
-            let file = self
-                .file
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("upload already finished"))?;
-            ensure!(
-                self.expected.is_none_or(|v| v == self.count),
-                "incomplete upload"
-            );
-            self.registry.upload(file.path())?;
-            Ok(())
-        })();
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
-        }
-        promise(result)
+        let file = self.file.take();
+        let registry = self.registry.clone();
+        let platform = self.platform.clone();
+        let import = self.import;
+        let expected = self.expected;
+        let count = self.count;
+        let started = self.started;
+        let sender = self.sender.take();
+        Promise::from_future(async move {
+            let result: Result<()> = async {
+                let file = file.ok_or_else(|| anyhow::anyhow!("upload already finished"))?;
+                ensure!(expected.is_none_or(|v| v == count), "incomplete upload");
+                tracing::info!(
+                    import,
+                    bytes = count,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Upload received; processing"
+                );
+                let operation = registry.begin_operation()?;
+                crate::work::upload(registry, platform, operation, file, import).await?;
+                Ok(())
+            }
+            .await;
+            if let Some(sender) = sender {
+                let _ = sender.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+            }
+            match &result {
+                Ok(()) => tracing::info!(
+                    import,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Upload processing complete"
+                ),
+                Err(err) => {
+                    tracing::warn!(import, error = ?err, "Upload processing failed")
+                }
+            }
+            result.map_err(error)
+        })
     }
 }
 impl web::request_stream::Server for Upload {
@@ -322,6 +402,7 @@ pub fn content(mut response: web::response::Builder<'_>, mime: &str, bytes: &[u8
     content.init_body().set_bytes(bytes);
 }
 fn failure(mut response: web::response::Builder<'_>, err: &anyhow::Error) {
+    tracing::warn!(error = ?err, "Request failed");
     let mut output = response.reborrow().init_client_error();
     output.set_status_code(web::response::ClientErrorCode::BadRequest);
     output.set_description_html(

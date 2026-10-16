@@ -1,0 +1,5 @@
+<nav class="tag-row" aria-label="Categories">
+  {% for tag in tags %}
+  <a data-tag="{{ tag.name }}" class="tag{% if tag.selected %} selected{% endif %}" href="{{ tag.href }}" title="{{ tag.count }} apps">{{ tag.name }}</a>
+  {% endfor %}
+</nav>

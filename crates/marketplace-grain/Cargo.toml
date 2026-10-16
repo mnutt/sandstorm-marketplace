@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 marketplace-web = { path = "../marketplace-web" }
@@ -21,8 +23,11 @@ blake2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 lzma-rust2 = "0.13"
-pgp = { version = "0.17", default-features = false }
+# Legacy Keybase proofs use short initial partial-body chunks accepted by GnuPG.
+# This enables parsing compatibility; cryptographic signature checks still apply.
+pgp = { version = "0.17", default-features = false, features = ["malformed-artifact-compat"] }
 tempfile = "3"
+tar = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [build-dependencies]

@@ -1,3 +1,4 @@
+mod assets;
 pub mod publish;
 
 use std::collections::BTreeMap;
@@ -48,6 +49,8 @@ struct AppState {
 #[derive(Template)]
 #[template(path = "home.html")]
 struct HomeTemplate<'a> {
+    show_welcome: bool,
+    search_action: String,
     tags: Vec<TagChip>,
     apps: Vec<ListingApp<'a>>,
     search: String,
@@ -56,6 +59,7 @@ struct HomeTemplate<'a> {
 #[derive(Template)]
 #[template(path = "app.html")]
 struct AppTemplate<'a> {
+    tags: Vec<TagChip>,
     app: &'a AppSummary,
     details: &'a AppDetailsForMarket,
     icon_url: String,
@@ -92,7 +96,6 @@ struct TagChip {
 
 #[derive(Debug, Default, Deserialize)]
 struct HomeParams {
-    tag: Option<String>,
     q: Option<String>,
 }
 
@@ -119,8 +122,11 @@ pub async fn run() -> Result<()> {
     let static_root = state.index.root.clone();
     let app = Router::new()
         .route("/", get(home))
+        .route("/genre/{genre}", get(genre))
+        .route("/genre/{genre}/", get(genre))
         .route("/app/{app_id}", get(app_detail))
         .route("/app/{app_id}/", get(app_detail))
+        .route("/assets/{name}", get(assets::serve))
         .route(
             "/marketplace.js",
             get(|| async {
@@ -151,7 +157,31 @@ async fn home(
     Query(params): Query<HomeParams>,
     State(state): State<AppState>,
 ) -> Result<Html<String>, AppError> {
-    let current_tag = params.tag.filter(|tag| !tag.is_empty());
+    render_home(params, state, None)
+}
+
+async fn genre(
+    Path(genre): Path<String>,
+    Query(params): Query<HomeParams>,
+    State(state): State<AppState>,
+) -> Result<Html<String>, AppError> {
+    if !state
+        .index
+        .index
+        .apps
+        .iter()
+        .any(|app| app.categories.contains(&genre))
+    {
+        return Err(AppError::not_found(format!("unknown category: {genre}")));
+    }
+    render_home(params, state, Some(genre))
+}
+
+fn render_home(
+    params: HomeParams,
+    state: AppState,
+    current_tag: Option<String>,
+) -> Result<Html<String>, AppError> {
     let search = params.q.unwrap_or_default();
     let search_lower = search.to_ascii_lowercase();
     let tags = build_tag_chips(&state.index, current_tag.as_deref(), &search);
@@ -190,7 +220,13 @@ async fn home(
         })
         .map(|app| listing(app, &state.package_base_url))
         .collect();
-    let template = HomeTemplate { tags, apps, search };
+    let template = HomeTemplate {
+        show_welcome: current_tag.is_none() && search.is_empty(),
+        search_action: home_href(current_tag.as_deref(), ""),
+        tags,
+        apps,
+        search,
+    };
     render(template)
 }
 
@@ -212,6 +248,7 @@ async fn app_detail(
 fn render_app(index: &LoadedAppIndex, app: &AppSummary, package_base_url: &str) -> Result<String> {
     let details = index.load_details(&app.app_id)?;
     let template = AppTemplate {
+        tags: build_tag_chips(index, None, ""),
         app,
         details: &details,
         icon_url: index.image_url(&app.image_id),
@@ -324,17 +361,13 @@ fn build_tag_chips(
 }
 
 fn home_href(tag: Option<&str>, search: &str) -> String {
-    let mut parts = Vec::new();
-    if let Some(tag) = tag {
-        parts.push(format!("tag={}", encode_query_value(tag)));
-    }
-    if !search.is_empty() {
-        parts.push(format!("q={}", encode_query_value(search)));
-    }
-    if parts.is_empty() {
-        "/".to_string()
+    let path = tag
+        .map(|tag| format!("/genre/{}", encode_query_value(tag).replace('+', "%20")))
+        .unwrap_or_else(|| "/".to_string());
+    if search.is_empty() {
+        path
     } else {
-        format!("/?{}", parts.join("&"))
+        format!("{path}?q={}", encode_query_value(search))
     }
 }
 
@@ -483,6 +516,7 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+#[derive(Debug)]
 struct AppError {
     status: StatusCode,
     message: String,
@@ -518,5 +552,52 @@ impl From<askama::Error> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (self.status, self.message).into_response()
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn category_links_encode_path_segments_and_preserve_search() {
+        assert_eq!(home_href(Some("Games"), ""), "/genre/Games");
+        assert_eq!(
+            home_href(Some("Office Tools"), "a+b"),
+            "/genre/Office%20Tools?q=a%2Bb"
+        );
+        assert_eq!(home_href(None, "editor"), "/?q=editor");
+    }
+
+    #[tokio::test]
+    async fn category_route_filters_apps_and_rejects_unknown_categories() {
+        let state = AppState {
+            index: Arc::new(
+                LoadedAppIndex::load(
+                    &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/app-index"),
+                )
+                .unwrap(),
+            ),
+            package_base_url: "/packages".to_string(),
+        };
+        let Html(html) = genre(
+            Path("Collaboration".into()),
+            Query(HomeParams::default()),
+            State(state.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(html.contains("<h2 title=\"Etherpad\">"));
+        assert!(!html.contains("<h2 title=\"Wekan\">"));
+        assert!(html.contains("id=\"welcome\" hidden"));
+        assert!(
+            genre(
+                Path("Missing".into()),
+                Query(HomeParams::default()),
+                State(state)
+            )
+            .await
+            .is_err()
+        );
     }
 }

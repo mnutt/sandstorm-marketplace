@@ -11,6 +11,14 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,marketplace_grain=info,marketplace_web=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args
         .first()
@@ -43,6 +51,7 @@ async fn main() -> Result<()> {
     let root = std::env::var_os("MARKETPLACE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| "/var".into());
+    tracing::info!(storage = %root.display(), "Starting marketplace grain");
     let registry = Registry::new(root)?;
     registry.publish()?;
     tokio::task::LocalSet::new()
@@ -61,6 +70,7 @@ async fn main() -> Result<()> {
             });
             let mut rpc = RpcSystem::new(Box::new(network), Some(view.client));
             *platform.borrow_mut() = Some(rpc.bootstrap(Side::Server));
+            tracing::info!("Marketplace RPC ready");
             rpc.await?;
             Ok::<_, anyhow::Error>(())
         })

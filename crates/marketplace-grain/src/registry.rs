@@ -15,19 +15,45 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub type Message = Reader<serialize::OwnedSegments>;
 #[derive(Clone)]
 pub struct Registry {
     pub root: PathBuf,
+    busy: Arc<AtomicBool>,
+}
+pub(crate) struct Operation(Arc<AtomicBool>);
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 impl Registry {
     pub fn new(root: PathBuf) -> Result<Self> {
         for directory in ["packages", "apps", "keybase", "tmp"] {
             fs::create_dir_all(root.join(directory))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            busy: Arc::new(AtomicBool::new(false)),
+        })
+    }
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+    pub(crate) fn begin_operation(&self) -> Result<Operation> {
+        ensure!(
+            self.busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "another registry operation is in progress; try again when it finishes"
+        );
+        Ok(Operation(self.busy.clone()))
     }
     pub fn temporary(&self) -> Result<tempfile::NamedTempFile> {
         Ok(tempfile::NamedTempFile::new_in(self.root.join("tmp"))?)
@@ -62,11 +88,24 @@ impl Registry {
         Ok(ids)
     }
     pub fn upload(&self, upload: &Path) -> Result<String> {
-        let verified = spk::verify(upload)?;
+        self.upload_cancellable(upload, &AtomicBool::new(false))
+    }
+    #[tracing::instrument(name = "upload", skip_all, err(Debug))]
+    pub(crate) fn upload_cancellable(
+        &self,
+        upload: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<String> {
+        crate::work::check_cancelled(cancelled)?;
+        let started = std::time::Instant::now();
+        tracing::info!(bytes = fs::metadata(upload)?.len(), "Verifying SPK");
+        let verified = spk::verify_in_cancellable(upload, &self.root.join("tmp"), cancelled)?;
+        crate::work::check_cancelled(cancelled)?;
         let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
         let id = hex::encode(ids::package_bytes(info.get_package_id()?));
         let dest = self.package_dir(&id)?;
         if dest.join("spk").exists() {
+            tracing::info!(package_id = %id, "Package already stored");
             return Ok(id);
         }
         let metadata = info.get_metadata()?;
@@ -118,6 +157,7 @@ impl Registry {
         staged.as_file().sync_all()?;
         staged.persist(dest.join("spk"))?;
         File::open(&dest)?.sync_all()?;
+        tracing::info!(package_id = %id, version = info.get_version(), elapsed_ms = started.elapsed().as_millis() as u64, "SPK verified and stored");
         Ok(id)
     }
     pub fn submission(&self, body: &[u8]) -> Result<Vec<u8>> {
@@ -157,6 +197,12 @@ impl Registry {
         Ok(output)
     }
     pub fn set_state(&self, id: &str, state: s::SubmissionState, sequence: u64) -> Result<()> {
+        tracing::info!(
+            package_id = id,
+            ?state,
+            sequence,
+            "Applying publication request"
+        );
         self.mutate(id, |mut status| {
             // Permit exact retries, but don't let a later no-op request leave an
             // earlier change replayable after it.
@@ -174,7 +220,9 @@ impl Registry {
             Ok(())
         })
     }
+    #[tracing::instrument(skip_all, fields(package_id = id, action = action), err(Debug))]
     pub fn review(&self, id: &str, action: &str, reason: &str) -> Result<()> {
+        tracing::info!("Applying review decision");
         self.mutate(id, |mut status| {
             match action {
                 "approve" => status.set_approved(""),
@@ -186,7 +234,7 @@ impl Registry {
         })?;
         self.publish()
     }
-    fn mutate(
+    pub(crate) fn mutate(
         &self,
         id: &str,
         change: impl FnOnce(s::submission_status::Builder<'_>) -> Result<()>,
@@ -213,7 +261,11 @@ impl Registry {
         }
         write_message(&self.package_dir(id)?.join("status"), &message)
     }
+    #[tracing::instrument(skip_all, err(Debug))]
     pub fn publish(&self) -> Result<()> {
+        let started = std::time::Instant::now();
+        let packages = self.package_ids()?;
+        tracing::info!(packages = packages.len(), "Rebuilding public catalog");
         let catalog = self.root.join("catalog");
         if catalog.exists() {
             fs::remove_dir_all(&catalog)?;
@@ -223,7 +275,7 @@ impl Registry {
         }
         let mut approved = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
         let mut pending = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
-        for id in self.package_ids()? {
+        for id in packages {
             let status = self.status(&id)?;
             let status = status.get_root::<s::submission_status::Reader>()?;
             if status.reborrow().get_request_state()? != s::SubmissionState::Publish {
@@ -279,7 +331,12 @@ impl Registry {
                 &serde_json::to_vec(&AppIndexForMarket { apps })?,
             )?;
         }
-        marketplace_web::publish::publish(&catalog, &self.root.join("www"))
+        marketplace_web::publish::publish(&catalog, &self.root.join("www"))?;
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Public site published"
+        );
+        Ok(())
     }
     pub fn queue(&self) -> Result<Value> {
         let mut queue = Vec::new();
