@@ -1,7 +1,7 @@
 SANDSTORM_SPK ?= $(HOME)/src/sandstorm/build/dev/bin/spk
 CONTACT_EMAIL ?= maintainer@example.invalid
 
-.PHONY: build package prepare-dev test test-package test-interop
+.PHONY: build package prepare-dev test test-package test-interop test-acceptance
 prepare-dev:
 	cargo xtask prepare-dev
 
@@ -20,3 +20,6 @@ test-interop:
 
 test-package:
 	cargo xtask test-package
+
+test-acceptance:
+	npm run test:acceptance

@@ -5,3 +5,6 @@
 /marketplace.db
 /build
 /.local
+/node_modules
+/playwright-report
+/test-results

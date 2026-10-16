@@ -1,0 +1,11 @@
+{
+  "name": "sandstorm-marketplace-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/frontend.cjs",
+    "test:acceptance": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
