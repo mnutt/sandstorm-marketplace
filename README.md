@@ -12,7 +12,7 @@ Private grain UI ── review/approval ──┘
                                               │
                                       generate static website
                                               │
-                                  atomically replace /var/www
+                                  replace /var/www
                                               │
                                      Sandstorm Web Publishing
 ```
@@ -324,8 +324,13 @@ key. If creating a separately signed fork, update that ID to match your key.
 The grain stores packages and submission state under `/var/packages`, builds a
 private catalog under `/var/catalog`, and calls the publisher library after state
 changes. The publisher stages a complete replacement next to `/var/www`, then
-uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations. Failed rendering
-leaves the previous site intact. Retrying the operation, clicking **Rebuild public site**, or
+uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations when available.
+When Sandstorm or the filesystem does not support directory exchange, publication
+uses ordinary renames with a saved previous generation. This fallback has a brief
+interval where public requests may return a missing-page response, but never
+exposes a partially built site. Failed installation restores the previous site;
+an interrupted swap is recovered on the next publication attempt before rendering.
+Failed rendering leaves the previous site intact. Retrying the operation, clicking **Rebuild public site**, or
 restarting the grain rebuilds from persisted state. Registry mutations are
 serialized; this implementation rebuilds the full site per change. Upload
 verification and catalog imports run on a worker thread so capability RPC remains

@@ -772,3 +772,75 @@ fn experimental_updates_require_approval_history_and_stay_author_controlled() ->
     assert!(!dir.path().join("www/packages").join(&next).exists());
     Ok(())
 }
+
+#[test]
+fn publication_and_import_when_sandbox_blocks_directory_exchange() -> anyhow::Result<()> {
+    const CHILD: &str = "MARKETPLACE_TEST_RENAMEAT2_ERRNO";
+    let Ok(errno) = std::env::var(CHILD) else {
+        // Seccomp is irreversible and thread-local: use a child test process so
+        // the rest of the test runner retains its normal syscall permissions.
+        for errno in [libc::ENOSYS, libc::EINVAL] {
+            let result = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "publication_and_import_when_sandbox_blocks_directory_exchange",
+                    "--nocapture",
+                ])
+                .env(CHILD, errno.to_string())
+                .output()?;
+            anyhow::ensure!(
+                result.status.success(),
+                "sandbox publication test failed: {}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        return Ok(());
+    };
+    let errno: u32 = errno.parse()?;
+    // Load seccomp_data.nr; reject renameat2, allow everything else. ENOSYS
+    // reproduces Sandstorm's allowlist; glibc may expose it as EINVAL.
+    let filter = [
+        libc::sock_filter {
+            code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        },
+        libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 1,
+            k: libc::SYS_renameat2 as u32,
+        },
+        libc::sock_filter {
+            code: (libc::BPF_RET | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ERRNO | errno,
+        },
+        libc::sock_filter {
+            code: (libc::BPF_RET | libc::BPF_K) as u16,
+            jt: 0,
+            jf: 0,
+            k: libc::SECCOMP_RET_ALLOW,
+        },
+    ];
+    let program = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr() as *mut _,
+    };
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            || libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program) != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    // Includes replacing an existing site, publishing approved and experimental
+    // releases, rejecting/withdrawing SPKs, and rebuilding after a restart.
+    catalog_import_is_atomic_and_empty_only()?;
+    registry_lifecycle_and_restart()?;
+    rollback_preserves_history_and_respects_author_and_review_state()?;
+    Ok(())
+}

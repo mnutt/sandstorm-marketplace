@@ -1,11 +1,12 @@
-//! Build outside the public tree, then swap directories with Linux renameat2.
+//! Build outside the public tree, then exchange directories where supported.
+//! Sandstorm falls back to recoverable ordinary renames.
 //! A generation contains real directories and hard links, never symlinks.
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use askama::Template;
 use marketplace_model::app_index::{AppDetailsForMarket, AppIndexForMarket, LoadedAppIndex};
 
@@ -53,7 +54,14 @@ pub(crate) fn publish_with_package_base(
         unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
         "another publisher holds the output lock"
     );
+    // Recover before rendering: a failed new build must not leave a site missing
+    // after an interrupted fallback swap.
+    recover_publication(&output)?;
     let stage = output.with_extension("publish-stage");
+    ensure!(
+        !stage.is_symlink(),
+        "publication stage must not be a symlink"
+    );
     if stage.exists() {
         fs::remove_dir_all(&stage)?;
     }
@@ -312,6 +320,47 @@ fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     Ok(())
 }
 
+fn sync_parent(output: &Path) -> Result<()> {
+    fs::File::open(output.parent().context("publication parent")?)?.sync_all()?;
+    Ok(())
+}
+
+// All callers hold the publication lock. If only the previous generation exists,
+// a swap was interrupted before the new site became visible; restore the old one.
+// If both exist, the new site committed and the previous generation is obsolete.
+fn recover_publication(output: &Path) -> Result<()> {
+    let previous = output.with_extension("publish-previous");
+    ensure!(
+        !previous.is_symlink(),
+        "previous publication must not be a symlink"
+    );
+    if previous.exists() {
+        if output.exists() {
+            fs::remove_dir_all(&previous)?;
+        } else {
+            fs::rename(&previous, output)?;
+        }
+        sync_parent(output)?;
+    }
+    Ok(())
+}
+
+fn commit_with_renames(stage: &Path, output: &Path) -> Result<()> {
+    let previous = output.with_extension("publish-previous");
+    fs::rename(output, &previous).context("saving previous publication")?;
+    // Persist the recovery point before replacing it. Readers can briefly see a
+    // missing site between these renames, but never a partially built generation.
+    let result = sync_parent(output)
+        .and_then(|()| fs::rename(stage, output).context("installing new publication"));
+    if let Err(error) = result {
+        recover_publication(output)
+            .context(format!("{error:#}; restoring previous publication"))?;
+        return Err(error);
+    }
+    sync_parent(output)?;
+    recover_publication(output)
+}
+
 fn commit(stage: &Path, output: &Path) -> Result<()> {
     if output.exists() {
         let from = CString::new(stage.as_os_str().as_bytes())?;
@@ -326,16 +375,21 @@ fn commit(stage: &Path, output: &Path) -> Result<()> {
             )
         } != 0
         {
-            bail!(
-                "atomic publication failed: {}",
-                std::io::Error::last_os_error()
-            );
+            let error = std::io::Error::last_os_error();
+            // Sandstorm can deny renameat2 with ENOSYS; glibc translates that to
+            // EINVAL for exchange flags. Filesystems may also lack exchange support.
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+            ) {
+                return commit_with_renames(stage, output);
+            }
+            return Err(error).context("atomic publication failed");
         }
     } else {
         fs::rename(stage, output)?;
     }
-    fs::File::open(output.parent().unwrap())?.sync_all()?;
-    Ok(())
+    sync_parent(output)
 }
 
 #[cfg(test)]
@@ -383,6 +437,44 @@ mod tests {
         assert!(!output.join("app").exists());
         assert!(!output.join("genre").exists());
         assert!(!output.join("packages/pkg-etherpad-0001").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_swap_rolls_back_on_failure_and_recovers_after_interruption() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let output = temp.path().join("www");
+        let previous = output.with_extension("publish-previous");
+        let stage = output.with_extension("publish-stage");
+        fs::create_dir(&output)?;
+        fs::write(output.join("index.html"), "old")?;
+        // A failure installing the new generation restores the previous site.
+        assert!(commit_with_renames(&stage, &output).is_err());
+        assert_eq!(fs::read_to_string(output.join("index.html"))?, "old");
+        assert!(!previous.exists());
+
+        fs::create_dir(&stage)?;
+        fs::write(stage.join("index.html"), "new")?;
+        fs::rename(&output, &previous)?;
+        // Simulate stopping between the two renames. Recovery must happen even
+        // when the next build fails to render.
+        let source = temp.path().join("source");
+        fs::create_dir(&source)?;
+        assert!(publish(&source, &output).is_err());
+        assert_eq!(fs::read_to_string(output.join("index.html"))?, "old");
+        assert!(!previous.exists());
+
+        fs::create_dir(&stage)?;
+        fs::write(stage.join("index.html"), "new")?;
+        commit_with_renames(&stage, &output)?;
+        assert_eq!(fs::read_to_string(output.join("index.html"))?, "new");
+        assert!(!previous.exists());
+        // Stopping after installation preserves the new site on recovery.
+        fs::create_dir(&previous)?;
+        fs::write(previous.join("index.html"), "old")?;
+        recover_publication(&output)?;
+        assert_eq!(fs::read_to_string(output.join("index.html"))?, "new");
+        assert!(!previous.exists());
         Ok(())
     }
 
