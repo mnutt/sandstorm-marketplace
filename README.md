@@ -22,6 +22,41 @@ filters run in the browser. Installation links preserve Sandstorm's `?host=`
 parameter and direct users back to their server with the public SPK URL.
 Without a host parameter, Install asks for a Sandstorm server URL.
 
+## Moving parts
+
+- `crates/marketplace-grain`: Rust Cap'n Proto RPC server, SPK verification,
+  submission protocol, persistent registry, and private review UI. Vendored
+  protocol definitions are documented in [UPSTREAM.md](crates/marketplace-grain/UPSTREAM.md).
+- `crates/marketplace-model`: shared catalog JSON types.
+- `crates/marketplace-web`: static publisher library and standalone preview server.
+- `crates/marketplace-sync`: command-line catalog mirroring and import-tarball generation.
+- `xtask`: Rust package builder and compatibility-test runner.
+
+The sync tool runs on your workstation and reads a public marketplace over
+HTTPS. The grain runs inside Sandstorm and handles private administration,
+imports, and author submissions over Cap'n Proto RPC. It uses the web crate as a
+library to generate `/var/www`; Sandstorm serves that directory through Web
+Publishing. The standalone web server is for local previews.
+
+There are two separate artifacts: `build/marketplace.spk` installs this
+marketplace application, while `build/marketplace-import.tar` carries catalog
+indexes and other apps' signed SPKs to seed an empty marketplace grain. The
+import tarball is uploaded through the grain's administration UI.
+
+```text
+Public marketplace ── marketplace-sync ── import.tar
+                                              │
+                                  administration UI upload
+                                              │
+                                  verify and import packages
+                                              │
+                               /var/packages (persistent state)
+                                              │
+                               /var/catalog (generated catalog)
+                                              │
+                               /var/www (generated public site)
+```
+
 ## Build and package
 
 Requires Linux, Rust/Cargo, the Cap'n Proto schema compiler (`capnp` on PATH, or
@@ -84,6 +119,103 @@ and App Index URL to the public site URL in the server's configuration.
 /packages/<packageId>      signed SPK downloads
 ```
 
+## Sync to a tarball, then upload
+
+Run these commands from the repository root. First install the marketplace SPK
+and create a grain as described above. Import requires the owner or an
+**approver**, an empty grain with no submitted packages, and no other write
+operation in progress. It is a one-time bootstrap, not an incremental sync into
+an existing grain.
+
+### 1. Generate the import tarball
+
+```bash
+cargo run --release -p marketplace-sync -- sync-remote \
+  --base-url https://app-index.sandstorm.io \
+  --output-dir data/app-index \
+  --tarball build/marketplace-import.tar
+```
+
+The base URL and output directory shown are the defaults. Use `--base-url` to
+copy another compatible public marketplace. This command fetches catalog JSON
+and images into `data/app-index`, then downloads the SPKs referenced by the
+approved and experimental indexes into an **uncompressed `.tar`** archive.
+The archive contains the indexes and packages; app details and images are
+regenerated from signed package manifests during import.
+
+For a smaller trial, use a separate output directory and a disposable empty grain:
+
+```bash
+cargo run --release -p marketplace-sync -- sync-remote \
+  --limit 10 \
+  --output-dir data/app-index-test \
+  --tarball build/marketplace-test.tar
+```
+
+`--limit` selects at most that many releases across both indexes: approved
+releases first, then experimental releases with any remaining allowance, ordered
+by app name within each index. Both saved indexes and the tarball contain only
+the selected releases. Omit the limit for the full current catalog. A trial
+import fills its grain too; create another empty grain for the full import.
+
+Wait for the command to exit successfully and log **Import tarball ready to
+upload**. The destination tarball is replaced only after generation succeeds;
+a failed run can leave an older tarball at that path. Rerunning downloads the
+selected packages again; it does not resume partial downloads. Reusing an output
+directory can leave old detail/image files, but only releases in the newly saved
+indexes are included in the archive.
+
+### 2. Upload through the grain
+
+1. Open the empty grain's administration page as owner or approver.
+2. Under **Import an existing marketplace**, select
+   `build/marketplace-import.tar` (or the test tarball).
+3. Click **Import marketplace** and keep the page open while it displays
+   **Uploading and verifying packages…**. This covers upload, verification, and
+   publication; the UI does not show a percentage. Detailed progress is in
+   Sandstorm's grain debug log.
+4. On success, the submission list refreshes and the import form disappears.
+   Open the **Public marketplace** link and check the catalog and an app detail
+   page. Approved releases appear in the main catalog; experimental releases
+   remain pending and public in `experimental/index.json`.
+
+The import endpoint is part of the private grain UI. `spk publish --webkey` is
+for individual author SPK submissions. In `spk dev`, rebuild with
+`cargo xtask prepare-dev` and restart the grain if it is running an older build
+without the import UI.
+
+If the form is missing, check your role, whether the grain already has packages,
+and whether another operation is running. Invalid archives fail before packages
+are committed, leaving an empty grain available for retry. If packages were
+committed but final publication failed, use **Rebuild public site** or restart
+the grain to regenerate the site from persisted state.
+
+### Import contents and limits
+
+The archive contains `apps/index.json`, optional `experimental/index.json`, and
+`packages/<packageId>` files. Upload limits are 16 GiB per tarball and 1 GiB per
+SPK. The importer rejects links, unexpected paths, duplicates, missing packages,
+invalid signatures, and mismatched package/app IDs or versions. It verifies all
+packages and renders the site in temporary storage before committing them.
+Use the sync-generated archive rather than tarring the mirror directory, which
+contains extra paths the importer does not accept.
+
+Approved listings become approved and public; experimental listings remain
+pending and public. Metadata and images are regenerated from signed manifests;
+public catalog author profiles and editorial overrides are not imported.
+Publication dates start at import time. Historical releases, embargoed packages,
+private review state, and signing keys are not part of this public snapshot.
+
+Allow local disk space for the mirror, tarball, and temporary SPK download, plus
+grain storage for the uploaded tarball, extracted packages, verification, and
+publication staging. See [Logs and temporary storage](#logs-and-temporary-storage)
+for progress logging and grain storage details.
+
+For a private migration of the old index grain, restore its `/var/packages`,
+`/var/apps`, and `/var/keybase` data (and optional `/var/descriptions` and
+`/var/keybase-token`) into the new grain's storage; startup reconstructs public
+output. This is a separate migration path from the public snapshot import.
+
 ## Development
 
 To develop against a local Sandstorm server, run from the repository root:
@@ -106,19 +238,11 @@ then restart the development grain to load the rebuilt executable. Restart
 The root pkgdef records the public app ID; developers do not need its private
 key. If creating a separately signed fork, update that ID to match your key.
 
-- `crates/marketplace-grain`: Rust Cap'n Proto RPC server, SPK verification,
-  submission protocol, persistent registry, and private review UI. Vendored
-  protocol definitions are documented in [UPSTREAM.md](crates/marketplace-grain/UPSTREAM.md).
-- `crates/marketplace-model`: shared catalog JSON types.
-- `crates/marketplace-web`: static publisher library and standalone preview server.
-- `crates/marketplace-sync`: mirror/import tools for catalog development.
-- `xtask`: Rust package builder and compatibility-test runner.
-
 The grain stores packages and submission state under `/var/packages`, builds a
 private catalog under `/var/catalog`, and calls the publisher library after state
 changes. The publisher stages a complete replacement next to `/var/www`, then
 uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations. Failed rendering
-leaves the previous site intact. Retrying the operation, clicking **reindex**, or
+leaves the previous site intact. Retrying the operation, clicking **Rebuild public site**, or
 restarting the grain rebuilds from persisted state. Registry mutations are
 serialized; this implementation rebuilds the full site per change. Upload
 verification and catalog imports run on a worker thread so capability RPC remains
@@ -133,7 +257,7 @@ a removed resource disappear between requests.
 Preview the fixtures (demo SPK files are placeholders, not installable apps):
 
 ```bash
-cargo run -p marketplace-web
+MARKETPLACE_FIXTURE_ROOT=fixtures/app-index cargo run -p marketplace-web
 # http://127.0.0.1:9938
 ```
 
@@ -151,43 +275,11 @@ MARKETPLACE_PACKAGE_BASE_URL=https://app-index.sandstorm.io/packages \
   cargo run -p marketplace-web
 ```
 
-To seed an empty grain from the public marketplace, generate an import tarball:
-
-```bash
-cargo run -p marketplace-sync -- sync-remote --tarball build/marketplace-import.tar
-# Small test import: at most 10 releases across both indexes.
-cargo run -p marketplace-sync -- sync-remote --limit=10 --tarball build/marketplace-test.tar
-```
-
-This also downloads the SPKs referenced by the approved and experimental indexes.
-`--limit` selects approved releases first, then experimental releases with any
-remaining allowance, ordered by app name within each index. Both saved indexes
-and the tarball contain only the selected releases; unselected details, images,
-and SPKs are not downloaded. Omit it to sync the full current catalog.
-In the grain's administration page, choose **Import an existing marketplace**,
-select the tarball, and click **Import marketplace**. In `spk dev`, first rebuild
-with `cargo xtask prepare-dev` and restart the grain to load the import UI.
-The form is visible only to approvers while no packages exist. Both buffered and
-streamed uploads enforce this on the server, including a second check when a
-stream finishes. Invalid imports leave the registry empty and can be retried.
-
-The archive contains `apps/index.json`, optional `experimental/index.json`, and
-`packages/<packageId>` files. Upload limits are 16 GiB per tarball and 1 GiB per
-SPK. The importer rejects links, unexpected paths, duplicates, missing packages,
-invalid signatures, and mismatched package/app IDs or versions. It verifies all
-packages and renders the site in temporary storage before committing them.
-Approved listings become approved and public; experimental listings remain
-pending and public. Metadata and images are regenerated from signed manifests;
-public catalog author profiles and editorial overrides are not imported.
-Publication dates start at import time. Historical releases, embargoed packages,
-private review state, and signing keys are not part of this public snapshot.
-
-Without `--tarball`, the mirror downloads only JSON and images. For a complete static export,
-the input catalog must contain the referenced SPKs as well. To migrate the old
-index grain, restore its private `/var/packages`, `/var/apps`, and `/var/keybase`
-data (and optional `/var/descriptions` and `/var/keybase-token`) into the new
-grain's storage; startup reconstructs public output. Live migration and server
-installation are separate from building the package.
+Without `--tarball`, the mirror downloads JSON and images only. Even with
+`--tarball`, downloaded SPKs go directly into the archive, not into
+`data/app-index/packages`. A self-contained static export needs the referenced
+SPKs in its input catalog's `packages/` directory; the preview command above
+instead links downloads to the upstream marketplace.
 
 The older `sync-fixtures` SQLite import remains available for development;
 `marketplace.db` is not used by the grain or static publisher.
