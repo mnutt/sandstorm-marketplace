@@ -1,6 +1,15 @@
 mod assets;
 pub mod publish;
 
+/// Embedded marketplace branding and styles, also served by the private admin UI.
+/// Only exact names in the static asset catalog are accepted.
+pub fn static_asset(name: &str) -> Option<(&'static str, &'static [u8])> {
+    assets::ASSETS
+        .iter()
+        .find(|asset| asset.name == name)
+        .map(|asset| (asset.content_type, asset.bytes))
+}
+
 use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;

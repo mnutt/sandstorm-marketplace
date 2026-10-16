@@ -97,6 +97,14 @@ impl web::Server for Session {
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
                     "admin-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"canApprove": can_approve, "busy": registry.is_busy()}))?),
+                    "review.css" => content(results.get(), "text/css; charset=utf-8", include_bytes!("review.css")),
+                    path if path.starts_with("assets/") => {
+                        match marketplace_web::static_asset(&path[7..]) {
+                            Some((mime, bytes)) => content(results.get(), mime, bytes),
+                            None => not_found(results.get()),
+                        }
+                    }
+                    "review.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("review.js")),
                     "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
                     "import-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"available": can_approve && !registry.is_busy() && registry.package_ids()?.is_empty()}))?),
                     "public-id" => {

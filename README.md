@@ -119,6 +119,43 @@ and App Index URL to the public site URL in the server's configuration.
 /packages/<packageId>      signed SPK downloads
 ```
 
+## Reviewing submissions and managing versions
+
+The administration page opens on a table of **Existing apps**, ordered by the
+most recent first-publication date among each app's stored releases, newest
+first. Apps that have never been published appear last. The table shows the
+current public version, last publication date, and links to app information and version history.
+Search by app name, app/package ID, or contact email.
+
+The **Awaiting approval** rail on the right shows pending releases whose authors
+requested review or publication, newest received first. It remains visible
+independently of the table search; on narrow screens it moves below the table.
+Existing packages without receipt timestamps display “Not recorded”. The page
+refreshes automatically every 30 seconds when idle.
+
+Open **Package details & description** to inspect a release, then **Approve**,
+**Reject / request update**, or **Return to review**. Each action explains its
+publication effect before confirmation. Rejection requires a reason, which the
+author can retrieve through submission status; no email is sent. Approving an
+embargoed release keeps it private until the author requests publication.
+Reviewers have read-only access; owners and approvers can make changes.
+
+Click an app name or release count to open its detail page with app information
+and all stored releases, newest build first, including rejected and withdrawn
+packages and the current public version. Use **All apps** or browser Back to
+return to the table. **Roll back to this version** selects an older approved release whose
+author still requests publication. This changes the public catalog listing;
+it does not downgrade installed grains or remove other approved downloads.
+Reject a faulty release separately if its download must be removed.
+
+Rollback selections persist in `/var/release-pins`, including across restarts
+and new approvals. **Use latest approved** clears the selection and returns to
+the highest eligible version. If the selected release is withdrawn, embargoed,
+or loses approval, the latest eligible approved release is used instead. The
+selection takes effect again if that release becomes eligible, until cleared.
+If final publication fails after a decision is saved, **Rebuild public site**
+under **Publishing setup & maintenance** retries publication from stored state.
+
 ## Sync to a tarball, then upload
 
 Run these commands from the repository root. First install the marketplace SPK
