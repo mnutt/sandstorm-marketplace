@@ -6,10 +6,9 @@ use capnp::{
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use marketplace_model::app_index::{
-    AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity, Screenshot,
+    AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity,
 };
 use serde::Serialize;
-use sha2::Digest;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
@@ -154,8 +153,7 @@ impl Registry {
         );
         // Exercise the same metadata/image conversion used by publication before
         // committing the package. A valid signature does not imply valid text or enums.
-        self.validate_catalog_entry(info)
-            .context("invalid marketplace metadata")?;
+        crate::catalog::parse(info, 0).context("invalid marketplace metadata")?;
         let app = ids::app_bytes(info.get_app_id()?);
         // Check all previously published releases, including withdrawn versions.
         for previous in self.package_ids()? {
@@ -259,7 +257,7 @@ impl Registry {
         tracing::info!("Applying review decision");
         if action == "approve" || action == "rollback" {
             let metadata = self.metadata(id)?;
-            self.validate_catalog_entry(metadata.get_root()?)
+            crate::catalog::parse(metadata.get_root()?, 0)
                 .context("invalid marketplace metadata")?;
         }
         if action == "rollback" || action == "latest" {
@@ -401,11 +399,9 @@ impl Registry {
                 _ => continue,
             };
             let metadata = self.metadata(&id)?;
-            let (app, details) = self.catalog_entry(
-                metadata.get_root()?,
-                status.reborrow().get_publish_date(),
-                Some(&catalog),
-            )?;
+            let entry = self.catalog_entry(metadata.get_root()?, status.get_publish_date())?;
+            entry.write_assets(&catalog)?;
+            let (app, details) = (entry.app, entry.details);
             fs::hard_link(
                 self.package_dir(&id)?.join("spk"),
                 catalog.join("packages").join(&id),
@@ -466,7 +462,9 @@ impl Registry {
             let status = self.status(&id)?;
             let status = status.get_root::<s::submission_status::Reader>()?;
             let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
-            let entry = self.catalog_entry(info, status.reborrow().get_publish_date(), None);
+            let entry = self
+                .catalog_entry(info, status.get_publish_date())
+                .map(|entry| (entry.app, entry.details));
             let validation_error = entry.as_ref().err().map(|err| format!("{err:#}"));
             // Older builds may have stored malformed metadata. Keep these releases
             // visible so an approver can reject them and restore publication.
@@ -537,75 +535,17 @@ impl Registry {
         }
         Ok(queue)
     }
-    fn validate_catalog_entry(&self, info: p::verified_info::Reader<'_>) -> Result<()> {
-        self.catalog_entry(info, 0, None)?;
-        Ok(())
-    }
-    fn catalog_entry(
+    fn catalog_entry<'a>(
         &self,
-        info: p::verified_info::Reader<'_>,
+        info: p::verified_info::Reader<'a>,
         published: i64,
-        catalog: Option<&Path>,
-    ) -> Result<(AppSummary, AppDetailsForMarket)> {
-        let meta = info.get_metadata()?;
-        let icons = meta.get_icons();
-        // Traverse image fields even for private queue/validation calls, without
-        // writing assets until a catalog destination is supplied.
-        let save_image = |data: &[u8], extension| -> Result<String> {
-            catalog
-                .map(|path| image(path, data, extension))
-                .transpose()
-                .map(|id| id.unwrap_or_default())
-        };
-        let mut image_id = String::new();
-        if icons.has_market() || icons.has_app_grid() {
-            let icon = if icons.has_market() {
-                icons.get_market()?
-            } else {
-                icons.get_app_grid()?
-            };
-            image_id = match icon.which()? {
-                p::metadata::icon::Svg(svg) => save_image(svg?.to_str()?.as_bytes(), "svg")?,
-                p::metadata::icon::Png(png) => save_image(
-                    if png.has_dpi1x() {
-                        png.get_dpi1x()?
-                    } else {
-                        png.get_dpi2x()?
-                    },
-                    "png",
-                )?,
-                _ => String::new(),
-            };
-        }
-        let mut screenshots = Vec::new();
-        for shot in meta.get_screenshots()? {
-            let image_id = match shot.which()? {
-                p::metadata::screenshot::Png(png) => save_image(png?, "png")?,
-                p::metadata::screenshot::Jpeg(jpeg) => save_image(jpeg?, "jpeg")?,
-                _ => bail!("unknown screenshot format"),
-            };
-            if catalog.is_some() {
-                screenshots.push(Screenshot {
-                    image_id,
-                    width: shot.get_width(),
-                    height: shot.get_height(),
-                });
-            }
-        }
-        let (is_open_source, license) = match meta.get_license().which()? {
-            p::metadata::license::OpenSource(value) => (
-                true,
-                LICENSES
-                    .get(value? as usize)
-                    .unwrap_or(&"Unknown")
-                    .to_string(),
-            ),
-            p::metadata::license::Proprietary(_) => (false, "Proprietary".to_string()),
-            p::metadata::license::PublicDomain(_) => (false, "Public Domain".to_string()),
-            _ => (false, String::new()),
-        };
-        let fingerprint = info.get_author_pgp_key_fingerprint()?.to_str()?;
-        let author =
+    ) -> Result<crate::catalog::Entry<'a>> {
+        let mut entry = crate::catalog::parse(info, published)?;
+        entry.app.author = self.author_profile(entry.fingerprint)?;
+        Ok(entry)
+    }
+    fn author_profile(&self, fingerprint: &str) -> Result<Option<AuthorIdentity>> {
+        Ok(
             if !fingerprint.is_empty() && self.root.join("keybase").join(fingerprint).exists() {
                 ensure!(
                     fingerprint.bytes().all(|c| c.is_ascii_hexdigit()),
@@ -631,97 +571,9 @@ impl Registry {
                 })
             } else {
                 None
-            };
-        Ok((
-            AppSummary {
-                app_id: ids::app_id(&ids::app_bytes(info.get_app_id()?)),
-                package_id: hex::encode(ids::package_bytes(info.get_package_id()?)),
-                name: info.get_title()?.get_default_text()?.to_str()?.to_string(),
-                version: info
-                    .get_marketing_version()?
-                    .get_default_text()?
-                    .to_str()?
-                    .to_string(),
-                version_number: info.get_version(),
-                image_id,
-                web_link: meta.get_website()?.to_str()?.to_string(),
-                code_link: meta.get_code_url()?.to_str()?.to_string(),
-                is_open_source,
-                categories: meta
-                    .get_categories()?
-                    .iter()
-                    .map(|c| c.map(|v| CATEGORIES[v as usize].to_string()))
-                    .collect::<std::result::Result<_, _>>()?,
-                author,
-                upstream_author: meta
-                    .get_author()
-                    .get_upstream_author()?
-                    .to_str()?
-                    .to_string(),
-                short_description: meta
-                    .get_short_description()?
-                    .get_default_text()?
-                    .to_str()?
-                    .to_string(),
-                created_at: chrono::DateTime::from_timestamp(published, 0)
-                    .context("invalid publish date")?
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string(),
             },
-            AppDetailsForMarket {
-                description: meta
-                    .get_description()?
-                    .get_default_text()?
-                    .to_str()?
-                    .to_string(),
-                screenshots,
-                license,
-            },
-        ))
+        )
     }
-}
-const CATEGORIES: &[&str] = &[
-    "Other",
-    "Productivity",
-    "Communications",
-    "Social",
-    "Web Publishing",
-    "Office",
-    "DevTools",
-    "Science",
-    "Media",
-    "Games",
-    "Graphics",
-];
-const LICENSES: &[&str] = &[
-    "Invalid",
-    "MIT License",
-    "Apache License v2",
-    "GNU GPL v3",
-    "GNU AGPL v3",
-    "BSD 3-Clause",
-    "BSD 2-Clause",
-    "GNU GPL v2",
-    "GNU LGPL v2.1",
-    "GNU LGPL v3",
-    "ISC License",
-    "Artistic License v2",
-    "Python License v2",
-    "PHP License v3",
-    "Mozilla Public License v2",
-    "CDDL",
-    "Eclipse Public License",
-    "Common Public Attribution License",
-    "Zlib/libpng License",
-];
-fn image(catalog: &Path, data: &[u8], extension: &str) -> Result<String> {
-    let hash = blake2::Blake2b::<blake2::digest::consts::U16>::digest(data);
-    let name = format!("{}.{}", hex::encode(hash), extension);
-    let path = catalog.join("images").join(&name);
-    if !path.exists() {
-        atomic_write(&path, data)?;
-    }
-    Ok(name)
 }
 pub fn read_message(path: &Path) -> Result<Message> {
     Ok(serialize::read_message(
