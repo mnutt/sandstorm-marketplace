@@ -208,23 +208,3 @@ test('experimental mode filters to pending updates and preserves mode through na
   await expect(page.locator('[data-install]')).toHaveCount(0);
   expect((await request.get(`/packages/${pending.app.packageId}`)).status()).toBe(404);
 });
-
-test('restore imported author profiles without changing review state', async ({ page, request }) => {
-  const before = await queue(request);
-  const index = await (await request.get('/public/apps/index.json')).json();
-  index.apps[0].author = { name: '', keybaseUsername: 'catalogpackager' };
-  const bytes = Buffer.from(JSON.stringify(index));
-  for (const role of ['reviewer', 'submitter']) {
-    expect((await request.post(`/${role}/restore-authors`, { data: bytes })).ok()).toBeFalsy();
-  }
-  await page.goto('/admin/');
-  await page.getByText('Publishing setup & maintenance', { exact: true }).click();
-  await page.getByLabel('Catalog index').setInputFiles({ name: 'index.json', mimeType: 'application/json', buffer: bytes });
-  await page.getByRole('button', { name: 'Restore author profiles', exact: true }).click();
-  await expect(page.locator('#message')).toHaveText('Restored author profiles for 1 release.');
-  const withoutAuthor = row => ({ ...row, app: { ...row.app, author: null } });
-  expect((await queue(request)).map(withoutAuthor)).toEqual(before.map(withoutAuthor));
-  await page.goto(`/app/${index.apps[0].appId}`);
-  await expect(page.locator('.author-name')).toHaveText('catalogpackager');
-  await expect(page.getByRole('link', { name: 'Keybase', exact: true })).toHaveAttribute('href', 'https://keybase.io/catalogpackager');
-});

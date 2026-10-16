@@ -392,8 +392,7 @@ fn import_bundle(corrupt: bool) -> anyhow::Result<Vec<u8>> {
     for name in ["apps/index.json", "experimental/index.json"] {
         let mut index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(source.path().join("catalog").join(name))?)?;
-        index["apps"][0]["author"] =
-            serde_json::json!({"name": "Imported Packager", "keybaseUsername": "packager"});
+        index["apps"][0]["author"] = serde_json::json!({"name": if name == "apps/index.json" { "Imported Packager" } else { "  " }, "keybaseUsername": "packager"});
         let bytes = serde_json::to_vec(&index)?;
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
@@ -452,13 +451,30 @@ fn catalog_import_is_atomic_and_empty_only() -> anyhow::Result<()> {
     assert_eq!(experimental["apps"][0]["versionNumber"], 2);
     assert_eq!(main["apps"][0]["author"]["name"], "Imported Packager");
     assert_eq!(
-        experimental["apps"][0]["author"]["name"],
-        "Imported Packager"
+        experimental["apps"][0]["author"]["keybaseUsername"],
+        "packager"
     );
     assert!(registry.import_catalog(valid.path()).is_err());
     let reopened = Registry::new(dir.path().to_owned())?;
     reopened.publish()?;
     assert_eq!(reopened.package_ids()?.len(), 2);
+    let app = main["apps"][0]["appId"].as_str().unwrap();
+    let html = std::fs::read_to_string(dir.path().join("www/app").join(app).join("index.html"))?;
+    assert!(html.contains("class=\"author-name\">Imported Packager</span>"));
+    assert!(html.contains("class=\"author-name\">packager</span>"));
+    let pending = experimental["apps"][0]["packageId"].as_str().unwrap();
+    assert!(
+        reopened
+            .preview(pending)?
+            .contains("class=\"author-name\">packager</span>")
+    );
+    // Imported display profiles apply only to the exact imported release.
+    let next = upload(&reopened, 3);
+    assert!(
+        reopened
+            .preview(&next)?
+            .contains("class=\"author-name\">Unknown</span>")
+    );
     Ok(())
 }
 
@@ -478,13 +494,6 @@ async fn catalog_import_permissions_and_streaming_race() -> anyhow::Result<()> {
         assert!(matches!(
             post(client, "import", &bundle).await?.get()?.which()?,
             web::response::ClientError(_)
-        ));
-        assert!(!matches!(
-            post(client, "restore-authors", b"{\"apps\":[]}")
-                .await?
-                .get()?
-                .which()?,
-            web::response::Content(_)
         ));
         let mut call = client.post_streaming_request();
         call.get().set_path("import");
@@ -761,56 +770,5 @@ fn experimental_updates_require_approval_history_and_stay_author_controlled() ->
     registry.review(&first, "rollback", "")?;
     assert!(experimental()?["apps"].as_array().unwrap().is_empty());
     assert!(!dir.path().join("www/packages").join(&next).exists());
-    Ok(())
-}
-
-#[test]
-fn restore_catalog_author_profiles() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let registry = Registry::new(dir.path().to_owned())?;
-    let id = upload(&registry, 1);
-    registry.set_state(&id, s::SubmissionState::Publish, 1)?;
-    registry.review(&id, "approve", "")?;
-    let index_path = dir.path().join("www/apps/index.json");
-    let mut index: serde_json::Value = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-    index["apps"][0]["author"] =
-        serde_json::json!({"name": "  ", "keybaseUsername": "testpackager"});
-    let valid = serde_json::to_vec(&index)?;
-    index["apps"][0]["versionNumber"] = 999.into();
-    assert!(
-        registry
-            .restore_catalog_authors(&serde_json::to_vec(&index)?)
-            .is_err()
-    );
-    assert!(
-        !registry
-            .package_dir(&id)?
-            .join("catalog-author.json")
-            .exists()
-    );
-    assert_eq!(registry.restore_catalog_authors(&valid)?, 1);
-    let reopened = Registry::new(dir.path().to_owned())?;
-    reopened.publish()?;
-    let app = ids::app_id(key().verifying_key().as_bytes());
-    let html = std::fs::read_to_string(dir.path().join("www/app").join(app).join("index.html"))?;
-    assert!(html.contains("class=\"author-name\">testpackager</span>"));
-    assert!(
-        reopened
-            .preview(&id)?
-            .contains("class=\"author-name\">testpackager</span>")
-    );
-    let restored: serde_json::Value = serde_json::from_slice(&std::fs::read(index_path)?)?;
-    assert_eq!(restored["apps"][0]["packageId"], id);
-    assert_eq!(
-        restored["apps"][0]["author"]["keybaseUsername"],
-        "testpackager"
-    );
-    // Profiles are tied to an exact release, not inherited by a later submission.
-    let next = upload(&reopened, 2);
-    assert!(
-        reopened
-            .preview(&next)?
-            .contains("class=\"author-name\">Unknown</span>")
-    );
     Ok(())
 }
