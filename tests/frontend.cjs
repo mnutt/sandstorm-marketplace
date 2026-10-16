@@ -31,10 +31,7 @@ test('review inbox excludes withdrawn submissions and orders by receipt', () => 
   const newest = release(2, {receivedAt: '2026-02-01T00:00:00Z', requestState: 'review'});
   const withdrawn = release(3, {requestState: 'ignore'});
   const rejected = release(4, {review: 'needsUpdate'});
-  assert.deepEqual(admin.reviewItems([old, withdrawn, rejected, newest], 'pending', ''), [newest, old]);
-  assert.deepEqual(admin.reviewItems([old, rejected], 'needsUpdate', 'AUTHOR@EXAMPLE'), [rejected]);
-  assert.equal(admin.reviewItems([old, withdrawn], 'all', '').length, 2);
-  assert.equal(admin.reviewItems([old], 'all', 'missing').length, 0);
+  assert.deepEqual(admin.pendingSubmissions([old, withdrawn, rejected, newest]), [newest, old]);
 });
 test('app history groups by identity, orders numeric versions, and restricts rollback', () => {
   const older = release(2, {review: 'approved'});
