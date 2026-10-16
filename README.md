@@ -338,10 +338,8 @@ Without `--tarball`, the mirror downloads JSON and images only. Even with
 `--tarball`, downloaded SPKs go directly into the archive, not into
 `data/app-index/packages`. A self-contained static export needs the referenced
 SPKs in its input catalog's `packages/` directory; the preview command above
-instead links downloads to the upstream marketplace.
-
-The older `sync-fixtures` SQLite import remains available for development;
-`marketplace.db` is not used by the grain or static publisher.
+generates the same static site in temporary storage and links downloads to the
+upstream marketplace. The preview is regenerated when the server starts.
 
 ## Validation
 

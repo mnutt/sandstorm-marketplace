@@ -12,6 +12,16 @@ use marketplace_model::app_index::LoadedAppIndex;
 use crate::{HomeTemplate, build_tag_chips, listing, render_app};
 
 pub fn publish(source: &Path, output: &Path) -> Result<()> {
+    publish_with_package_base(source, output, None)
+}
+
+// Remote mirrors do not contain SPKs. Only preview may use an upstream URL;
+// production publication always requires a self-contained package tree.
+pub(crate) fn publish_with_package_base(
+    source: &Path,
+    output: &Path,
+    package_base: Option<&str>,
+) -> Result<()> {
     let source = source.canonicalize()?;
     let parent = output
         .parent()
@@ -48,14 +58,14 @@ pub fn publish(source: &Path, output: &Path) -> Result<()> {
         fs::remove_dir_all(&stage)?;
     }
     fs::create_dir(&stage)?;
-    let result = build(&source, &stage).and_then(|()| commit(&stage, &output));
+    let result = build(&source, &stage, package_base).and_then(|()| commit(&stage, &output));
     if stage.exists() {
         fs::remove_dir_all(&stage)?;
     }
     result
 }
 
-fn build(source: &Path, stage: &Path) -> Result<()> {
+fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> {
     let index = LoadedAppIndex::load(source)?;
     // Copy only the public catalog, never private metadata or submission state.
     for directory in ["apps", "experimental", "images", "packages"] {
@@ -70,7 +80,7 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
         safe_name(&app.package_id)?;
         ensure!(known.insert(&app.app_id), "duplicate app ID");
         ensure!(
-            stage.join("packages").join(&app.package_id).is_file(),
+            package_base.is_some() || stage.join("packages").join(&app.package_id).is_file(),
             "missing package {}",
             app.package_id
         );
@@ -84,7 +94,7 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
         fs::create_dir_all(&directory)?;
         write(
             &directory.join("index.html"),
-            render_app(&index, app, "/packages")?,
+            render_app(&index, app, package_base.unwrap_or("/packages"))?,
         )?;
     }
     let template = HomeTemplate {
@@ -95,7 +105,7 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
             .index
             .apps
             .iter()
-            .map(|app| listing(app, "/packages"))
+            .map(|app| listing(app, package_base.unwrap_or("/packages")))
             .collect(),
         search: String::new(),
     };
@@ -124,7 +134,7 @@ fn build(source: &Path, stage: &Path) -> Result<()> {
                 .apps
                 .iter()
                 .filter(|app| app.categories.contains(&tag.name))
-                .map(|app| listing(app, "/packages"))
+                .map(|app| listing(app, package_base.unwrap_or("/packages")))
                 .collect(),
             search: String::new(),
         };
@@ -227,37 +237,16 @@ fn commit(stage: &Path, output: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    struct Temp(PathBuf);
-    impl Temp {
-        fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "marketplace-publish-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&dir).unwrap();
-            Self(dir)
-        }
-    }
-    impl Drop for Temp {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn publication_is_complete_and_failure_preserves_previous_generation() -> Result<()> {
-        let temp = Temp::new();
-        let source = temp.0.join("source");
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source");
         fs::create_dir(&source)?;
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/app-index");
         for dir in ["apps", "images", "packages"] {
             copy_flat_directory(&fixtures.join(dir), &source.join(dir))?;
         }
-        let output = temp.0.join("www");
+        let output = temp.path().join("www");
         publish(&source, &output)?;
         let original = fs::read(output.join("index.html"))?;
         assert!(String::from_utf8_lossy(&original).contains("Etherpad"));
@@ -294,15 +283,38 @@ mod tests {
     }
 
     #[test]
+    fn remote_preview_uses_static_pages_without_local_packages() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source");
+        fs::create_dir(&source)?;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/app-index");
+        for dir in ["apps", "images"] {
+            copy_flat_directory(&fixtures.join(dir), &source.join(dir))?;
+        }
+        let output = temp.path().join("preview");
+        assert!(publish(&source, &output).is_err());
+        publish_with_package_base(&source, &output, Some("https://market.example/packages"))?;
+        let home = fs::read_to_string(output.join("index.html"))?;
+        assert!(home.contains("https://market.example/packages/pkg-etherpad-0001"));
+        let category = fs::read_to_string(output.join("genre/Collaboration/index.html"))?;
+        assert!(category.contains("Etherpad"));
+        assert!(!category.contains("<h2 title=\"Wekan\">"));
+        let id = LoadedAppIndex::load(&source)?.index.apps[0].app_id.clone();
+        let detail = fs::read_to_string(output.join(format!("app/{id}/index.html")))?;
+        assert!(detail.contains("https://market.example/packages/"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_path_traversal_and_symlinks() -> Result<()> {
         for name in ["", ".", "..", "../secret", "a/b", "/etc/passwd"] {
             assert!(safe_name(name).is_err());
         }
-        let temp = Temp::new();
-        let source = temp.0.join("source");
+        let temp = tempfile::tempdir()?;
+        let source = temp.path().join("source");
         fs::create_dir(&source)?;
         std::os::unix::fs::symlink("/etc/passwd", source.join("secret"))?;
-        assert!(copy_flat_directory(&source, &temp.0.join("out")).is_err());
+        assert!(copy_flat_directory(&source, &temp.path().join("out")).is_err());
         Ok(())
     }
 }

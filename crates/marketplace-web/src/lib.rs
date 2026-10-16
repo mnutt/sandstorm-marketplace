@@ -14,18 +14,12 @@ use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use askama::Template;
 use axum::Router;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
 use clap::{Parser, Subcommand};
 use marketplace_model::app_index::{AppDetailsForMarket, AppSummary, LoadedAppIndex};
-use serde::Deserialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -47,12 +41,6 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-}
-
-#[derive(Clone)]
-struct AppState {
-    index: Arc<LoadedAppIndex>,
-    package_base_url: String,
 }
 
 #[derive(Template)]
@@ -103,11 +91,6 @@ struct TagChip {
     selected: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct HomeParams {
-    q: Option<String>,
-}
-
 #[tokio::main]
 pub async fn run() -> Result<()> {
     init_tracing();
@@ -115,41 +98,16 @@ pub async fn run() -> Result<()> {
         return publish::publish(&source, &output);
     }
 
-    let fixture_root = fixture_root();
-    let loaded = LoadedAppIndex::load(&fixture_root).with_context(|| {
-        format!(
-            "failed to load fixture data from {}",
-            fixture_root.display()
-        )
-    })?;
-
-    let state = AppState {
-        index: Arc::new(loaded),
-        package_base_url: package_base_url(),
-    };
-
-    let static_root = state.index.root.clone();
+    // Preview the exact static output used by the grain. The temporary tree lives
+    // until the server exits; remote mirrors may link to upstream packages.
+    let preview = tempfile::tempdir()?;
+    let output = preview.path().join("public");
+    let package_base = env::var("MARKETPLACE_PACKAGE_BASE_URL").ok();
+    publish::publish_with_package_base(&fixture_root(), &output, package_base.as_deref())?;
     let app = Router::new()
-        .route("/", get(home))
-        .route("/genre/{genre}", get(genre))
-        .route("/genre/{genre}/", get(genre))
-        .route("/app/{app_id}", get(app_detail))
-        .route("/app/{app_id}/", get(app_detail))
-        .route("/assets/{name}", get(assets::serve))
-        .route(
-            "/marketplace.js",
-            get(|| async {
-                (
-                    [(axum::http::header::CONTENT_TYPE, "text/javascript")],
-                    include_str!("../static/marketplace.js"),
-                )
-            }),
-        )
-        .nest_service("/images", ServeDir::new(static_root.join("images")))
-        .nest_service("/static", ServeDir::new(static_root))
+        .fallback_service(ServeDir::new(output))
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = env::var("MARKETPLACE_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:9938".to_string())
@@ -160,98 +118,6 @@ pub async fn run() -> Result<()> {
     tracing::info!("listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn home(
-    Query(params): Query<HomeParams>,
-    State(state): State<AppState>,
-) -> Result<Html<String>, AppError> {
-    render_home(params, state, None)
-}
-
-async fn genre(
-    Path(genre): Path<String>,
-    Query(params): Query<HomeParams>,
-    State(state): State<AppState>,
-) -> Result<Html<String>, AppError> {
-    if !state
-        .index
-        .index
-        .apps
-        .iter()
-        .any(|app| app.categories.contains(&genre))
-    {
-        return Err(AppError::not_found(format!("unknown category: {genre}")));
-    }
-    render_home(params, state, Some(genre))
-}
-
-fn render_home(
-    params: HomeParams,
-    state: AppState,
-    current_tag: Option<String>,
-) -> Result<Html<String>, AppError> {
-    let search = params.q.unwrap_or_default();
-    let search_lower = search.to_ascii_lowercase();
-    let tags = build_tag_chips(&state.index, current_tag.as_deref(), &search);
-    let apps = state
-        .index
-        .index
-        .apps
-        .iter()
-        .filter(|app| match current_tag.as_deref() {
-            Some(tag) => app.categories.iter().any(|category| category == tag),
-            None => true,
-        })
-        .filter(|app| {
-            if search_lower.is_empty() {
-                return true;
-            }
-
-            let mut haystacks = vec![
-                app.name.as_str(),
-                app.short_description.as_str(),
-                app.upstream_author.as_str(),
-                app.version.as_str(),
-            ];
-
-            if let Some(author) = &app.author {
-                haystacks.push(author.name.as_str());
-                haystacks.push(author.github_username.as_str());
-                haystacks.push(author.keybase_username.as_str());
-            }
-
-            haystacks.extend(app.categories.iter().map(String::as_str));
-
-            haystacks
-                .into_iter()
-                .any(|value| value.to_ascii_lowercase().contains(&search_lower))
-        })
-        .map(|app| listing(app, &state.package_base_url))
-        .collect();
-    let template = HomeTemplate {
-        show_welcome: current_tag.is_none() && search.is_empty(),
-        search_action: home_href(current_tag.as_deref(), ""),
-        tags,
-        apps,
-        search,
-    };
-    render(template)
-}
-
-async fn app_detail(
-    Path(app_id): Path<String>,
-    State(state): State<AppState>,
-) -> Result<Html<String>, AppError> {
-    let app = state
-        .index
-        .app(&app_id)
-        .ok_or_else(|| AppError::not_found(format!("unknown app id: {app_id}")))?;
-    Ok(Html(render_app(
-        &state.index,
-        app,
-        &state.package_base_url,
-    )?))
 }
 
 fn render_app(index: &LoadedAppIndex, app: &AppSummary, package_base_url: &str) -> Result<String> {
@@ -308,10 +174,6 @@ fn listing<'a>(app: &'a AppSummary, package_base_url: &str) -> ListingApp<'a> {
     }
 }
 
-fn render(template: impl Template) -> Result<Html<String>, AppError> {
-    Ok(Html(template.render()?))
-}
-
 fn fixture_root() -> PathBuf {
     if let Ok(path) = env::var("MARKETPLACE_FIXTURE_ROOT") {
         return PathBuf::from(path);
@@ -323,10 +185,6 @@ fn fixture_root() -> PathBuf {
     } else {
         PathBuf::from("fixtures/app-index")
     }
-}
-
-fn package_base_url() -> String {
-    env::var("MARKETPLACE_PACKAGE_BASE_URL").unwrap_or_else(|_| "/static/packages".to_string())
 }
 
 fn join_url(base: &str, tail: &str) -> String {
@@ -525,45 +383,6 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-#[derive(Debug)]
-struct AppError {
-    status: StatusCode,
-    message: String,
-}
-
-impl AppError {
-    fn not_found(message: String) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            message,
-        }
-    }
-}
-
-impl From<anyhow::Error> for AppError {
-    fn from(error: anyhow::Error) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
-    }
-}
-
-impl From<askama::Error> for AppError {
-    fn from(error: askama::Error) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (self.status, self.message).into_response()
-    }
-}
-
 #[cfg(test)]
 mod route_tests {
     use super::*;
@@ -576,37 +395,5 @@ mod route_tests {
             "/genre/Office%20Tools?q=a%2Bb"
         );
         assert_eq!(home_href(None, "editor"), "/?q=editor");
-    }
-
-    #[tokio::test]
-    async fn category_route_filters_apps_and_rejects_unknown_categories() {
-        let state = AppState {
-            index: Arc::new(
-                LoadedAppIndex::load(
-                    &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/app-index"),
-                )
-                .unwrap(),
-            ),
-            package_base_url: "/packages".to_string(),
-        };
-        let Html(html) = genre(
-            Path("Collaboration".into()),
-            Query(HomeParams::default()),
-            State(state.clone()),
-        )
-        .await
-        .unwrap();
-        assert!(html.contains("<h2 title=\"Etherpad\">"));
-        assert!(!html.contains("<h2 title=\"Wekan\">"));
-        assert!(html.contains("id=\"welcome\" hidden"));
-        assert!(
-            genre(
-                Path("Missing".into()),
-                Query(HomeParams::default()),
-                State(state)
-            )
-            .await
-            .is_err()
-        );
     }
 }

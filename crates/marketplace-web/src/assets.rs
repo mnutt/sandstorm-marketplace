@@ -1,8 +1,4 @@
 //! Assets shared by the preview server and each static publication.
-use axum::extract::Path;
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
-
 pub(crate) struct Asset {
     pub name: &'static str,
     pub content_type: &'static str,
@@ -30,10 +26,3 @@ pub(crate) const ASSETS: &[Asset] = &[
     asset!("Sandstorm-LICENSE.txt", "text/plain; charset=utf-8"),
     asset!("SourceSans-LICENSE.txt", "text/plain; charset=utf-8"),
 ];
-
-pub(crate) async fn serve(Path(name): Path<String>) -> Response {
-    match ASSETS.iter().find(|asset| asset.name == name) {
-        Some(asset) => ([(header::CONTENT_TYPE, asset.content_type)], asset.bytes).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
