@@ -1,5 +1,9 @@
 //! Empty-grain bootstrap from a public catalog. Never extracts arbitrary tar paths.
-use crate::{ids, package_capnp as p, registry::Registry, spk, submit_capnp as s};
+use crate::{
+    ids, package_capnp as p,
+    registry::{Registry, atomic_write},
+    spk, submit_capnp as s,
+};
 use anyhow::{Context, Result, ensure};
 use marketplace_model::app_index::AppIndexForMarket;
 use std::{
@@ -11,6 +15,44 @@ use std::{
 
 pub const IMPORT_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
 impl Registry {
+    /// Restore unsigned display profiles from an administrator-supplied catalog.
+    /// Match exact verified releases; never attach a profile by an unverified app ID.
+    pub fn restore_catalog_authors(&self, bytes: &[u8]) -> Result<usize> {
+        ensure!(bytes.len() <= 16 * 1024 * 1024, "catalog index too large");
+        let index: AppIndexForMarket = serde_json::from_slice(bytes)?;
+        let known: BTreeSet<_> = self.package_ids()?.into_iter().collect();
+        let mut profiles = BTreeMap::new();
+        for app in index.apps {
+            let Some(author) = app.author else { continue };
+            if !known.contains(&app.package_id) {
+                continue;
+            }
+            let message = self.metadata(&app.package_id)?;
+            let info = message.get_root::<p::verified_info::Reader>()?;
+            ensure!(
+                ids::app_id(&ids::app_bytes(info.get_app_id()?)) == app.app_id
+                    && info.get_version() == app.version_number,
+                "SPK identity/version does not match catalog"
+            );
+            ensure!(
+                profiles.insert(app.package_id, author).is_none(),
+                "duplicate package in catalog"
+            );
+        }
+        ensure!(
+            !profiles.is_empty(),
+            "catalog contains no author profiles matching stored releases"
+        );
+        for (id, author) in &profiles {
+            atomic_write(
+                &self.package_dir(id)?.join("catalog-author.json"),
+                &serde_json::to_vec(author)?,
+            )?;
+        }
+        self.publish()?;
+        Ok(profiles.len())
+    }
+
     pub fn import_catalog(&self, path: &Path) -> Result<()> {
         self.import_catalog_cancellable(path, &std::sync::atomic::AtomicBool::new(false))
     }
@@ -120,6 +162,12 @@ impl Registry {
                         && info.get_version() == app.version_number,
                     "SPK identity/version does not match catalog"
                 );
+                if let Some(author) = app.author {
+                    atomic_write(
+                        &staged.package_dir(&id)?.join("catalog-author.json"),
+                        &serde_json::to_vec(&author)?,
+                    )?;
+                }
                 states.push((id, is_approved));
             }
         }

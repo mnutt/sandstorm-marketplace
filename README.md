@@ -281,7 +281,13 @@ contains extra paths the importer does not accept.
 
 Approved listings become approved and public; eligible experimental listings remain
 pending and public. Metadata and images are regenerated from signed manifests;
-public catalog author profiles and editorial overrides are not imported.
+author display profiles are preserved from the imported catalog for each exact
+release. These profiles are catalog-supplied metadata, not verified identity proofs;
+a Keybase lookup takes precedence. Editorial overrides are not imported.
+For grains imported before author profiles were preserved, open **Publishing setup
+& maintenance** and use **Restore author profiles** with the original mirror’s
+`apps/index.json` (and `experimental/index.json` for pending releases). Only matching
+stored package IDs, app IDs, and versions are updated; approval states stay intact.
 Publication dates start at import time. Historical releases, embargoed packages,
 private review state, and signing keys are not part of this public snapshot.
 

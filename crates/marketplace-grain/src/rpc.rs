@@ -234,6 +234,13 @@ impl web::Server for Session {
                         )
                         .await?;
                         results.get().init_no_content();
+                    } else if path == "restore-authors" {
+                        let count = registry.restore_catalog_authors(body)?;
+                        content(
+                            results.get(),
+                            "application/json",
+                            &serde_json::to_vec(&count)?,
+                        );
                     } else if path == "reindex" {
                         registry.publish()?;
                         results.get().init_no_content();

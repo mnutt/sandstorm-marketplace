@@ -649,6 +649,21 @@ if (typeof document !== "undefined") {
       }
     });
   };
+  $("authors-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const file = $("authors-file").files[0];
+    if (!file) return;
+    await runAction(async () => {
+      if (file.size > 16 * 1024 * 1024)
+        throw new Error("Catalog index exceeds 16 MiB.");
+      const count = await (await request("restore-authors", file)).json();
+      await refresh();
+      notice(
+        "message",
+        `Restored author profiles for ${count} ${count === 1 ? "release" : "releases"}.`,
+      );
+    });
+  };
   $("reindex").onclick = () =>
     runAction(async () => {
       await request("reindex", "");

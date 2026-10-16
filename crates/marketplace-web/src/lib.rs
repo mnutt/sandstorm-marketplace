@@ -200,7 +200,13 @@ fn app_template<'a>(app: &'a AppSummary, details: &'a AppDetailsForMarket) -> Ap
         author_name: app
             .author
             .as_ref()
-            .map(|author| author.name.clone())
+            .map(|author| {
+                if author.name.trim().is_empty() {
+                    author.keybase_username.trim().to_string()
+                } else {
+                    author.name.trim().to_string()
+                }
+            })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "Unknown".to_string()),
         social_links: build_social_links(app),

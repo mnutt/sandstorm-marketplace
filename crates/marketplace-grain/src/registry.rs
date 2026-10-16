@@ -661,6 +661,18 @@ impl Registry {
     ) -> Result<crate::catalog::Entry<'a>> {
         let mut entry = crate::catalog::parse(info, published)?;
         entry.app.author = self.author_profile(entry.fingerprint)?;
+        if entry.app.author.is_none() {
+            // Imported profiles describe this exact package, not a verified Keybase
+            // identity. Keep them separate so a live lookup always takes precedence.
+            let path = self
+                .package_dir(&entry.app.package_id)?
+                .join("catalog-author.json");
+            match fs::read(path) {
+                Ok(bytes) => entry.app.author = Some(serde_json::from_slice(&bytes)?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(entry)
     }
     fn author_profile(&self, fingerprint: &str) -> Result<Option<AuthorIdentity>> {
