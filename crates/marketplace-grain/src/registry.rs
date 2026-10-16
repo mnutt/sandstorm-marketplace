@@ -35,7 +35,7 @@ impl Drop for Operation {
 }
 impl Registry {
     pub fn new(root: PathBuf) -> Result<Self> {
-        for directory in ["packages", "apps", "keybase", "tmp"] {
+        for directory in ["packages", "apps", "keybase", "tmp", "release-pins"] {
             fs::create_dir_all(root.join(directory))?;
         }
         Ok(Self {
@@ -148,6 +148,10 @@ impl Registry {
         }
         fs::create_dir_all(&dest)?;
         write_message(&dest.join("metadata"), &verified)?;
+        atomic_write(
+            &dest.join("received-at"),
+            chrono::Utc::now().to_rfc3339().as_bytes(),
+        )?;
         let mut status = Builder::new_default();
         status.init_root::<s::submission_status::Builder>();
         write_message(&dest.join("status"), &status)?;
@@ -223,6 +227,46 @@ impl Registry {
     #[tracing::instrument(skip_all, fields(package_id = id, action = action), err(Debug))]
     pub fn review(&self, id: &str, action: &str, reason: &str) -> Result<()> {
         tracing::info!("Applying review decision");
+        if action == "rollback" || action == "latest" {
+            let metadata = self.metadata(id)?;
+            let info = metadata.get_root::<p::verified_info::Reader>()?;
+            let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
+            if action == "rollback" {
+                let status = self.status(id)?;
+                let status = status.get_root::<s::submission_status::Reader>()?;
+                ensure!(
+                    status.get_request_state()? == s::SubmissionState::Publish
+                        && matches!(status.which()?, s::submission_status::Approved(_)),
+                    "only approved releases requested for publication can be selected"
+                );
+                let current = self.selected_releases()?;
+                let current_id = current
+                    .get(&app_id)
+                    .context("app has no published release")?;
+                let current_metadata = self.metadata(current_id)?;
+                ensure!(
+                    self.release_pin(&app_id)? == id
+                        || info.get_version()
+                            < current_metadata
+                                .get_root::<p::verified_info::Reader>()?
+                                .get_version(),
+                    "rollback must select an older release than the current public version"
+                );
+            }
+            atomic_write(
+                &self.root.join("release-pins").join(app_id),
+                if action == "rollback" {
+                    id.as_bytes()
+                } else {
+                    b""
+                },
+            )?;
+            return self.publish();
+        }
+        ensure!(
+            action != "reject" || !reason.trim().is_empty(),
+            "a rejection reason is required"
+        );
         self.mutate(id, |mut status| {
             match action {
                 "approve" => status.set_approved(""),
@@ -261,10 +305,45 @@ impl Registry {
         }
         write_message(&self.package_dir(id)?.join("status"), &message)
     }
+    // A pin only applies while its release is approved and the author permits publication.
+    // Otherwise use the newest eligible release, without overriding author withdrawal.
+    fn release_pin(&self, app_id: &str) -> Result<String> {
+        match fs::read_to_string(self.root.join("release-pins").join(app_id)) {
+            Ok(value) => Ok(value),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(err) => Err(err.into()),
+        }
+    }
+    fn selected_releases(&self) -> Result<BTreeMap<String, String>> {
+        let mut selected = BTreeMap::<String, (String, u32, bool)>::new();
+        for id in self.package_ids()? {
+            let status = self.status(&id)?;
+            let status = status.get_root::<s::submission_status::Reader>()?;
+            if status.get_request_state()? != s::SubmissionState::Publish
+                || !matches!(status.which()?, s::submission_status::Approved(_))
+            {
+                continue;
+            }
+            let metadata = self.metadata(&id)?;
+            let info = metadata.get_root::<p::verified_info::Reader>()?;
+            let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
+            let pinned = self.release_pin(&app_id)? == id;
+            if selected.get(&app_id).is_none_or(|(_, version, old_pin)| {
+                pinned || (!old_pin && info.get_version() > *version)
+            }) {
+                selected.insert(app_id, (id, info.get_version(), pinned));
+            }
+        }
+        Ok(selected
+            .into_iter()
+            .map(|(app, (id, _, _))| (app, id))
+            .collect())
+    }
     #[tracing::instrument(skip_all, err(Debug))]
     pub fn publish(&self) -> Result<()> {
         let started = std::time::Instant::now();
         let packages = self.package_ids()?;
+        let selected = self.selected_releases()?;
         tracing::info!(packages = packages.len(), "Rebuilding public catalog");
         let catalog = self.root.join("catalog");
         if catalog.exists() {
@@ -296,6 +375,11 @@ impl Registry {
                 self.package_dir(&id)?.join("spk"),
                 catalog.join("packages").join(&id),
             )?;
+            if matches!(status.which()?, s::submission_status::Approved(_))
+                && selected.get(&app.app_id) != Some(&id)
+            {
+                continue;
+            }
             if entries
                 .get(&app.app_id)
                 .is_none_or(|(old, _)| old.version_number < app.version_number)
@@ -340,6 +424,7 @@ impl Registry {
     }
     pub fn queue(&self) -> Result<Value> {
         let mut queue = Vec::new();
+        let selected = self.selected_releases()?;
         for id in self.package_ids()? {
             let message = self.metadata(&id)?;
             let info = message.get_root::<p::verified_info::Reader>()?;
@@ -352,7 +437,11 @@ impl Registry {
                 s::submission_status::NeedsUpdate(reason) => ("needsUpdate", reason?.to_str()?),
                 _ => ("pending", ""),
             };
-            queue.push(json!({"app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
+            let pin = self.release_pin(&app.app_id)?;
+            let current = selected.get(&app.app_id) == Some(&id);
+            let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
+            queue.push(json!({"current": current, "pinnedPackageId": pin,
+                "receivedAt": received_at, "publishedAt": status.get_publish_date(), "app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
                 "review": review, "reason": reason, "contactEmail": info.get_metadata()?.get_author().get_contact_email()?.to_str()?,
                 "fingerprint": info.get_author_pgp_key_fingerprint()?.to_str()?}));
         }

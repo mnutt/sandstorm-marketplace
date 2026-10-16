@@ -166,6 +166,61 @@ fn registry_lifecycle_and_restart() -> anyhow::Result<()> {
 }
 
 #[test]
+fn rollback_preserves_history_and_respects_author_and_review_state() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let first = upload(&registry, 1);
+    registry.submission(&request(&first, Some(s::SubmissionState::Publish), 1))?;
+    registry.review(&first, "approve", "")?;
+    let second = upload(&registry, 2);
+    registry.submission(&request(&second, Some(s::SubmissionState::Publish), 1))?;
+    registry.review(&second, "approve", "")?;
+    let public_id = || -> anyhow::Result<String> {
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("www/apps/index.json"))?)?;
+        Ok(index["apps"][0]["packageId"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(public_id()?, second);
+    registry.review(&first, "rollback", "")?;
+    assert_eq!(public_id()?, first);
+    registry.review(&first, "rollback", "")?; // Retry after a lost response or failed publication.
+    assert!(dir.path().join("www/packages").join(&second).exists());
+    let reopened = Registry::new(dir.path().to_owned())?;
+    reopened.publish()?;
+    assert_eq!(public_id()?, first);
+    let queue = reopened.queue()?;
+    let first_row = queue
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["app"]["packageId"] == first)
+        .unwrap();
+    assert_eq!(first_row["current"], true);
+    assert_eq!(first_row["pinnedPackageId"], first);
+    assert!(first_row["receivedAt"].is_string());
+    assert!(reopened.review(&second, "rollback", "").is_err());
+    let third = upload(&reopened, 3);
+    reopened.submission(&request(&third, Some(s::SubmissionState::Publish), 1))?;
+    assert!(reopened.review(&third, "rollback", "").is_err());
+    reopened.review(&third, "approve", "")?;
+    assert_eq!(public_id()?, first); // Explicit selection survives new approvals.
+    reopened.review(&third, "latest", "")?;
+    assert_eq!(public_id()?, third);
+    reopened.review(&first, "rollback", "")?;
+    reopened.submission(&request(&first, Some(s::SubmissionState::Ignore), 2))?;
+    assert_eq!(public_id()?, third);
+    assert!(!dir.path().join("www/packages").join(&first).exists());
+    assert!(reopened.review(&first, "rollback", "").is_err());
+    reopened.submission(&request(&first, Some(s::SubmissionState::Publish), 3))?;
+    assert_eq!(public_id()?, first);
+    assert!(reopened.review(&first, "reject", "  ").is_err());
+    reopened.review(&first, "reject", "Broken release")?;
+    assert_eq!(public_id()?, third);
+    assert!(reopened.review(&first, "rollback", "").is_err());
+    Ok(())
+}
+
+#[test]
 fn rejects_corrupt_packages_and_invalid_ids() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let registry = Registry::new(temp.path().to_owned())?;
@@ -273,6 +328,31 @@ async fn api_permissions_and_streaming_order() -> anyhow::Result<()> {
         web::response::NoContent(_)
     ));
     assert!(temp.path().join("www/index.html").exists());
+    for action in ["rollback", "latest"] {
+        for client in [&reviewer, &api] {
+            assert!(matches!(
+                post(client, &format!("{action}/{id}"), b"")
+                    .await?
+                    .get()?
+                    .which()?,
+                web::response::ClientError(_)
+            ));
+        }
+    }
+    let mut status = reviewer.get_request();
+    status.get().set_path("admin-status");
+    let response = status.send().promise.await?;
+    if let web::response::Content(content) = response.get()?.which()? {
+        if let web::response::content::body::Bytes(bytes) = content.get_body().which()? {
+            let status: serde_json::Value = serde_json::from_slice(bytes?)?;
+            assert_eq!(status["canApprove"], false);
+        } else {
+            panic!("expected status JSON");
+        }
+    } else {
+        panic!("expected status response");
+    }
+
     assert!(matches!(
         post(&api, "reindex", b"").await?.get()?.which()?,
         web::response::ClientError(_)

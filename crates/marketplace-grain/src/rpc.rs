@@ -96,6 +96,7 @@ impl web::Server for Session {
                 let path = params.get()?.get_path()?.to_str()?;
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
+                    "admin-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"canApprove": can_approve, "busy": registry.is_busy()}))?),
                     "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
                     "import-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"available": can_approve && !registry.is_busy() && registry.package_ids()?.is_empty()}))?),
                     "public-id" => {
