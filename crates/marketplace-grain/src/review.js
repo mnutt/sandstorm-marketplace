@@ -232,9 +232,11 @@ if (typeof document !== 'undefined') {
     if (refreshing) return;
     refreshing = true; updateControls();
     try {
-      const [data, status, imports] = await Promise.all([json('queue'), json('admin-status'), json('import-status')]);
-      items = data; canApprove = status.canApprove; serverBusy = status.busy;
-      $('import').hidden = !imports.available;
+      const snapshot = await json('admin');
+      items = snapshot.releases;
+      canApprove = snapshot.canApprove;
+      serverBusy = snapshot.busy;
+      $('import').hidden = !canApprove || serverBusy || items.length !== 0;
       render();
     } finally { refreshing = false; updateControls(); }
   }

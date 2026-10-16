@@ -8,7 +8,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use marketplace_model::app_index::{
     AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity, Screenshot,
 };
-use serde_json::{Value, json};
+use serde::Serialize;
 use sha2::Digest;
 use std::{
     collections::BTreeMap,
@@ -20,6 +20,32 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSnapshot {
+    pub releases: Vec<ReviewRelease>,
+    pub can_approve: bool,
+    pub busy: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRelease {
+    pub current: bool,
+    pub pinned_package_id: String,
+    pub public_download: bool,
+    pub received_at: Option<String>,
+    pub published_at: i64,
+    pub app: AppSummary,
+    pub details: AppDetailsForMarket,
+    pub request_state: &'static str,
+    pub review: &'static str,
+    pub reason: String,
+    pub validation_error: Option<String>,
+    pub contact_email: String,
+    pub fingerprint: String,
+}
 
 pub type Message = Reader<serialize::OwnedSegments>;
 #[derive(Clone)]
@@ -431,7 +457,7 @@ impl Registry {
         );
         Ok(())
     }
-    pub fn queue(&self) -> Result<Value> {
+    pub fn queue(&self) -> Result<Vec<ReviewRelease>> {
         let mut queue = Vec::new();
         let selected = self.selected_releases()?;
         for id in self.package_ids()? {
@@ -477,13 +503,39 @@ impl Registry {
             let pin = self.release_pin(&app.app_id)?;
             let current = selected.get(&app.app_id) == Some(&id);
             let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
-            queue.push(json!({"current": current, "pinnedPackageId": pin,
-                "publicDownload": self.root.join("www/packages").join(&id).is_file(), "receivedAt": received_at, "publishedAt": status.get_publish_date(), "app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
-                "review": review, "reason": reason, "validationError": validation_error,
-                "contactEmail": info.get_metadata()?.get_author().get_contact_email().ok().and_then(|value| value.to_str().ok()).unwrap_or(""),
-                "fingerprint": info.get_author_pgp_key_fingerprint().ok().and_then(|value| value.to_str().ok()).unwrap_or("")}));
+            queue.push(ReviewRelease {
+                current,
+                pinned_package_id: pin,
+                public_download: self.root.join("www/packages").join(&id).is_file(),
+                received_at,
+                published_at: status.get_publish_date(),
+                app,
+                details,
+                request_state: match status.get_request_state()? {
+                    s::SubmissionState::Publish => "publish",
+                    s::SubmissionState::Review => "review",
+                    s::SubmissionState::Ignore => "ignore",
+                },
+                review,
+                reason: reason.to_owned(),
+                validation_error,
+                contact_email: info
+                    .get_metadata()?
+                    .get_author()
+                    .get_contact_email()
+                    .ok()
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned(),
+                fingerprint: info
+                    .get_author_pgp_key_fingerprint()
+                    .ok()
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_owned(),
+            });
         }
-        Ok(Value::Array(queue))
+        Ok(queue)
     }
     fn validate_catalog_entry(&self, info: p::verified_info::Reader<'_>) -> Result<()> {
         self.catalog_entry(info, 0, None)?;

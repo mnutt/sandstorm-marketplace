@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 
-async function queue(request) { return (await request.get('/admin/queue')).json(); }
+async function queue(request) { return (await (await request.get('/admin/admin')).json()).releases; }
 async function publicVersion(request) {
   const catalog = await (await request.get('/public/apps/index.json')).json();
   return catalog.apps[0]?.versionNumber;

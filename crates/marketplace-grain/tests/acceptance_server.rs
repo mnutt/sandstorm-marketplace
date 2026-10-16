@@ -242,7 +242,7 @@ impl Fixture {
                 None,
             ));
         }
-        if path == "queue" && self.fail_queue {
+        if path == "admin" && self.fail_queue {
             self.fail_queue = false;
             return Ok(response(
                 503,

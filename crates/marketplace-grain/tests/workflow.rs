@@ -92,7 +92,7 @@ fn rollback_preserves_history_and_respects_author_and_review_state() -> anyhow::
     let reopened = Registry::new(dir.path().to_owned())?;
     reopened.publish()?;
     assert_eq!(public_id()?, first);
-    let queue = reopened.queue()?;
+    let queue = serde_json::to_value(reopened.queue()?)?;
     let first_row = queue
         .as_array()
         .unwrap()
@@ -214,7 +214,7 @@ async fn api_permissions_and_streaming_order() -> anyhow::Result<()> {
         }
     }
     let mut status = reviewer.get_request();
-    status.get().set_path("admin-status");
+    status.get().set_path("admin");
     let response = status.send().promise.await?;
     if let web::response::Content(content) = response.get()?.which()? {
         if let web::response::content::body::Bytes(bytes) = content.get_body().which()? {
@@ -332,7 +332,7 @@ async fn process_entry_point(recovery: bool) -> anyhow::Result<()> {
                 let admin = session(&view, &[true, true, false], false).await?;
                 if let Some(id) = &broken {
                     let mut queue = admin.get_request();
-                    queue.get().set_path("queue");
+                    queue.get().set_path("admin");
                     assert!(matches!(
                         queue.send().promise.await?.get()?.which()?,
                         web::response::Content(_)
@@ -521,7 +521,7 @@ async fn streamed_catalog_import_disables_admin_import() -> anyhow::Result<()> {
     ));
     assert_eq!(registry.package_ids()?.len(), 2);
     let mut status = admin.get_request();
-    status.get().set_path("import-status");
+    status.get().set_path("admin");
     let response = status.send().promise.await?;
     let web::response::Content(content) = response.get()?.which()? else {
         panic!("expected JSON");
@@ -529,10 +529,10 @@ async fn streamed_catalog_import_disables_admin_import() -> anyhow::Result<()> {
     let web::response::content::body::Bytes(body) = content.get_body().which()? else {
         panic!("expected bytes");
     };
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(body?)?,
-        serde_json::json!({"available": false})
-    );
+    let snapshot: serde_json::Value = serde_json::from_slice(body?)?;
+    assert_eq!(snapshot["canApprove"], true);
+    assert_eq!(snapshot["busy"], false);
+    assert_eq!(snapshot["releases"].as_array().unwrap().len(), 2);
     Ok(())
 }
 
@@ -598,7 +598,7 @@ async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow
             let id = upload(&registry, 1);
             registry.submission(&request(&id, Some(s::SubmissionState::Review), 1))?;
             assert!(!dir.path().join("www/packages").join(&id).exists());
-            assert_eq!(registry.queue()?[0]["publicDownload"], false);
+            assert_eq!(registry.queue()?[0].public_download, false);
             let view = capnp_rpc::new_client(View {
                 registry: registry.clone(),
                 platform: Rc::new(RefCell::new(None)),
@@ -678,7 +678,7 @@ fn invalid_metadata_is_rejected_before_commit_and_legacy_entries_remain_reviewab
     );
     assert!(registry.package_ids()?.is_empty());
     let bad = seed_legacy_invalid(&registry, 1)?;
-    let queue = registry.queue()?;
+    let queue = serde_json::to_value(registry.queue()?)?;
     assert!(
         queue[0]["validationError"]
             .as_str()

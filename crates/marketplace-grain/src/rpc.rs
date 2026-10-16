@@ -2,7 +2,7 @@ use crate::{
     api_session_capnp::api_session,
     grain_capnp::{sandstorm_api, ui_session, ui_view},
     hack_session_capnp::hack_session_context,
-    registry::Registry,
+    registry::{AdminSnapshot, Registry},
     util_capnp::byte_stream,
     web_session_capnp::web_session as web,
 };
@@ -103,7 +103,14 @@ impl web::Server for Session {
                 let path = params.get()?.get_path()?.to_str()?;
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
-                    "admin-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"canApprove": can_approve, "busy": registry.is_busy()}))?),
+                    "admin" => {
+                        let snapshot = AdminSnapshot {
+                            releases: registry.queue()?,
+                            can_approve,
+                            busy: registry.is_busy(),
+                        };
+                        content(results.get(), "application/json", &serde_json::to_vec(&snapshot)?);
+                    }
                     "review.css" => content(results.get(), "text/css; charset=utf-8", include_bytes!("review.css")),
                     path if path.starts_with("assets/") => {
                         match marketplace_web::static_asset(&path[7..]) {
@@ -129,8 +136,6 @@ impl web::Server for Session {
                         response.reborrow().init_disposition().set_download(&format!("{id}.spk"));
                         response.init_body().set_stream(capnp_rpc::new_client(Download(task)));
                     }
-                    "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
-                    "import-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"available": can_approve && !registry.is_busy() && registry.package_ids()?.is_empty()}))?),
                     "public-id" => {
                         let response = context.get_public_id_request().send().promise.await?; let response = response.get()?;
                         let body = serde_json::json!({"publicId": response.get_public_id()?.to_str()?, "hostname": response.get_hostname()?.to_str()?, "autoUrl": response.get_auto_url()?.to_str()?, "isDemoUser": response.get_is_demo_user()});
