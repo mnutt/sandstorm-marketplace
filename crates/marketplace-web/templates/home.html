@@ -26,6 +26,7 @@
     <section class="welcome" id="welcome"{% if !show_welcome %} hidden{% endif %}><p><strong>Sandstorm</strong> is a self-hostable web productivity suite.</p></section>
     <p class="intro">Install any of the apps below with just one click.</p>
     <main>
+      {% if experimental %}<p class="preview-notice" role="status">Experimental mode · Pending updates to previously approved apps only.</p>{% endif %}
       <h1 class="catalog-title" id="catalog-title">{% for tag in tags %}{% if tag.selected %}{% if tag.name == "All" %}All Apps{% else %}{{ tag.name }}{% endif %}{% endif %}{% endfor %}</h1>
       <section class="grid" aria-labelledby="catalog-title">
         {% for listing in apps %}

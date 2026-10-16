@@ -190,6 +190,16 @@ impl Fixture {
                     let id = self.submit(version, false).await?;
                     return Ok(response(200, "text/plain", id.into_bytes(), None));
                 }
+                "/__test/new-app" => {
+                    let key = ed25519_dalek::SigningKey::from_bytes(&[43; 32]);
+                    let bytes = common::package_with_key(1, false, &key, "Unreviewed app");
+                    let mut file = self.registry.temporary()?;
+                    file.write_all(&bytes)?;
+                    let id = self.registry.upload(file.path())?;
+                    self.registry.set_state(&id, SubmissionState::Publish, 1)?;
+                    self.registry.publish()?;
+                    return Ok(response(200, "text/plain", id.into_bytes(), None));
+                }
                 "/__test/fail-next-queue" => {
                     self.fail_queue = true;
                     return Ok(response(204, "text/plain", vec![], None));
@@ -201,7 +211,13 @@ impl Fixture {
                 _ => {}
             }
         }
-        if let Some(path) = path.strip_prefix("/public/") {
+        if let Some(path) = path.strip_prefix("/public/").or_else(|| {
+            path.strip_prefix('/').filter(|p| {
+                !["admin/", "reviewer/", "submitter/"]
+                    .iter()
+                    .any(|prefix| p.starts_with(prefix))
+            })
+        }) {
             let path = if path.is_empty() { "index.html" } else { path };
             if path.split('/').any(|part| part == ".." || part == ".") {
                 bail!("invalid path");
@@ -212,10 +228,14 @@ impl Fixture {
             } else {
                 file
             };
-            let mime = if path.ends_with(".json") {
-                "application/json"
-            } else {
-                "text/html"
+            let mime = match file.extension().and_then(|ext| ext.to_str()) {
+                Some("json") => "application/json",
+                Some("js") => "text/javascript",
+                Some("css") => "text/css",
+                Some("svg") => "image/svg+xml",
+                Some("png") => "image/png",
+                Some("woff2") => "font/woff2",
+                _ => "text/html",
             };
             return Ok(match std::fs::read(file) {
                 Ok(bytes) => response(200, mime, bytes, None),

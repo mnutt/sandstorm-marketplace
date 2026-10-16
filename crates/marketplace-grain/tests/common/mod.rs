@@ -20,12 +20,18 @@ pub fn package(version: u32) -> Vec<u8> {
     package_with_description(version, false)
 }
 pub fn package_with_description(version: u32, malformed: bool) -> Vec<u8> {
+    package_with_key(version, malformed, &key(), "Rust test app")
+}
+pub fn package_with_key(
+    version: u32,
+    malformed: bool,
+    signing: &SigningKey,
+    title: &str,
+) -> Vec<u8> {
     let mut manifest = Builder::new_default();
     {
         let mut m = manifest.init_root::<p::manifest::Builder>();
-        m.reborrow()
-            .init_app_title()
-            .set_default_text("Rust test app");
+        m.reborrow().init_app_title().set_default_text(title);
         m.set_app_version(version);
         m.reborrow()
             .init_app_marketing_version()
@@ -42,11 +48,17 @@ pub fn package_with_description(version: u32, malformed: bool) -> Vec<u8> {
         metadata
             .reborrow()
             .init_description()
-            .set_default_text("A signed integration-test package.");
-        metadata
-            .reborrow()
-            .init_categories(1)
-            .set(0, p::Category::DeveloperTools);
+            .set_default_text(&format!(
+                "A signed integration-test package. Description for build {version}."
+            ));
+        metadata.reborrow().init_categories(1).set(
+            0,
+            if version == 3 {
+                p::Category::Productivity
+            } else {
+                p::Category::DeveloperTools
+            },
+        );
         metadata.reborrow().init_icons().init_market().set_svg(&format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"><text x=\"5\" y=\"30\">{version}</text></svg>"));
         use base64::Engine;
         let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
@@ -78,11 +90,11 @@ pub fn package_with_description(version: u32, malformed: bool) -> Vec<u8> {
     let mut archive_bytes = Vec::new();
     serialize::write_message(&mut archive_bytes, &archive).unwrap();
     let hash = Sha512::digest(&archive_bytes);
-    let mut signed = key().sign(&hash).to_bytes().to_vec();
+    let mut signed = signing.sign(&hash).to_bytes().to_vec();
     signed.extend_from_slice(&hash);
     let mut signature = Builder::new_default();
     let mut root = signature.init_root::<p::signature::Builder>();
-    root.set_public_key(key().verifying_key().as_bytes());
+    root.set_public_key(signing.verifying_key().as_bytes());
     root.set_signature(&signed);
     let mut encoder =
         lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
@@ -177,5 +189,6 @@ pub fn seed_legacy_invalid(registry: &Registry, version: u32) -> anyhow::Result<
         .set_request_state(s::SubmissionState::Publish);
     marketplace_grain::registry::write_message(&dir.join("status"), &status)?;
     std::fs::write(dir.join("spk"), bytes)?;
+    std::fs::write(dir.join("ever-approved"), b"")?;
     Ok(id)
 }

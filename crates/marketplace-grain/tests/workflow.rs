@@ -57,7 +57,7 @@ fn registry_lifecycle_and_restart() -> anyhow::Result<()> {
     let next = upload(&registry, 2);
     registry.submission(&request(&next, Some(s::SubmissionState::Publish), 1))?;
     assert!(dir.path().join("www/packages").join(&next).exists());
-    assert!(!page.exists());
+    assert!(std::fs::read_to_string(&page)?.contains("No approved public release"));
     assert!(
         std::fs::read_to_string(dir.path().join("www/experimental/index.json"))?.contains(&next)
     );
@@ -689,5 +689,56 @@ fn invalid_metadata_is_rejected_before_commit_and_legacy_entries_remain_reviewab
     registry.review(&bad, "reject", "Invalid description")?;
     registry.publish()?;
     assert!(dir.path().join("www/index.html").exists());
+    Ok(())
+}
+
+#[test]
+fn experimental_updates_require_approval_history_and_stay_author_controlled() -> anyhow::Result<()>
+{
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let first = upload(&registry, 1);
+    let next = upload(&registry, 2);
+    registry.submission(&request(&first, Some(s::SubmissionState::Publish), 1))?;
+    registry.submission(&request(&next, Some(s::SubmissionState::Publish), 1))?;
+    let experimental = || -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::from_slice(&std::fs::read(
+            dir.path().join("www/experimental/index.json"),
+        )?)?)
+    };
+    assert_eq!(experimental()?["apps"].as_array().unwrap().len(), 0);
+    for id in [&first, &next] {
+        assert!(!dir.path().join("www/packages").join(id).exists());
+    }
+    assert_eq!(std::fs::read_dir(dir.path().join("www/images"))?.count(), 0);
+    assert!(registry.preview(&next)?.contains("Private listing preview"));
+    // Approving an embargoed release counts, but does not publish that release.
+    registry.submission(&request(&first, Some(s::SubmissionState::Review), 2))?;
+    registry.review(&first, "approve", "")?;
+    assert_eq!(experimental()?["apps"][0]["packageId"], next);
+    registry.review(&first, "reject", "Withdrawn approval")?;
+    let reopened = Registry::new(dir.path().to_owned())?;
+    reopened.publish()?;
+    assert_eq!(experimental()?["apps"][0]["packageId"], next);
+    assert!(!dir.path().join("www/packages").join(&first).exists());
+    registry.submission(&request(&next, Some(s::SubmissionState::Review), 2))?;
+    assert!(experimental()?["apps"].as_array().unwrap().is_empty());
+    registry.submission(&request(&next, Some(s::SubmissionState::Publish), 3))?;
+    registry.review(&next, "reject", "Not ready")?;
+    assert!(experimental()?["apps"].as_array().unwrap().is_empty());
+    registry.review(&next, "unapprove", "")?;
+    assert_eq!(experimental()?["apps"][0]["packageId"], next);
+    registry.submission(&request(&next, Some(s::SubmissionState::Ignore), 4))?;
+    assert!(experimental()?["apps"].as_array().unwrap().is_empty());
+    // A stale pending version must not bypass an intentional rollback.
+    registry.submission(&request(&next, Some(s::SubmissionState::Publish), 5))?;
+    let third = upload(&registry, 3);
+    registry.submission(&request(&third, Some(s::SubmissionState::Publish), 1))?;
+    registry.review(&third, "approve", "")?;
+    registry.submission(&request(&first, Some(s::SubmissionState::Publish), 3))?;
+    registry.review(&first, "approve", "")?;
+    registry.review(&first, "rollback", "")?;
+    assert!(experimental()?["apps"].as_array().unwrap().is_empty());
+    assert!(!dir.path().join("www/packages").join(&next).exists());
     Ok(())
 }

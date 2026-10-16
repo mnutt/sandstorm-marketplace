@@ -27,6 +27,7 @@
       {% endif %}
     </header>
     <main class="app-page">
+      {% if experimental %}<p class="preview-notice" role="status">Experimental release · Pending approval</p>{% endif %}
       <a class="back" href="{{ home_href }}">{% if preview %}Back to app history{% else %}Back to all apps{% endif %}</a>
       {% if preview %}<p class="preview-notice" role="status">Private listing preview · Build {{ app.version_number }} · Previewing does not approve or publish this release.</p>{% endif %}
       <section class="hero">
@@ -112,45 +113,7 @@
         <img id="lightbox-image" alt="">
       </div>
     </main>
-    <script>
-      (() => {
-        const lightbox = document.getElementById("lightbox");
-        const lightboxImage = document.getElementById("lightbox-image");
-        const closeButton = document.getElementById("lightbox-close");
-        if (!lightbox || !lightboxImage || !closeButton) return;
 
-        const open = (src, alt) => {
-          lightboxImage.src = src;
-          lightboxImage.alt = alt || "";
-          lightbox.classList.add("open");
-          lightbox.setAttribute("aria-hidden", "false");
-          document.body.style.overflow = "hidden";
-        };
-
-        const close = () => {
-          lightbox.classList.remove("open");
-          lightbox.setAttribute("aria-hidden", "true");
-          lightboxImage.removeAttribute("src");
-          document.body.style.overflow = "";
-        };
-
-        document.querySelectorAll("[data-lightbox-src]").forEach((button) => {
-          button.addEventListener("click", () => {
-            open(button.dataset.lightboxSrc, button.dataset.lightboxAlt);
-          });
-        });
-
-        closeButton.addEventListener("click", close);
-        lightbox.addEventListener("click", (event) => {
-          if (event.target === lightbox) close();
-        });
-        document.addEventListener("keydown", (event) => {
-          if (event.key === "Escape" && lightbox.classList.contains("open")) {
-            close();
-          }
-        });
-      })();
-    </script>
     {% if preview %}
     <dialog class="install-dialog" id="install-dialog" aria-labelledby="install-title">
       <form id="install-form">

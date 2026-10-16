@@ -171,7 +171,7 @@ if (typeof document !== "undefined") {
       reject:
         "This release will be removed from public listings and downloads. The author can retrieve your reason through submission status; no email is sent.",
       unapprove:
-        "This release will return to pending review. If the author requests publication, it will be available in the experimental catalog.",
+        "This release will return to pending review. If the author requests publication, it can appear in experimental mode when it is newer than the app’s approved public releases.",
       rollback:
         "List this older approved release instead of the current public version. Other approved packages stay downloadable. Installed grains are not downgraded. The selection persists until “Use latest approved”, unless the selected release becomes ineligible.",
       latest:

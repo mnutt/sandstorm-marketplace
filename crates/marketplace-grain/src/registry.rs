@@ -53,6 +53,7 @@ struct Release {
     app_id: String,
     version: u32,
     pin: String,
+    ever_approved: bool,
     metadata: Message,
     status: Message,
 }
@@ -351,6 +352,13 @@ impl Registry {
             "package not uploaded"
         );
         let old = self.status(id)?;
+        // Preserve approval history even if an embargoed approval is later revoked.
+        if matches!(
+            old.get_root::<s::submission_status::Reader>()?.which()?,
+            s::submission_status::Approved(_)
+        ) {
+            self.remember_approval(id)?;
+        }
         let mut message = Builder::new_default();
         message.set_root(old.get_root::<s::submission_status::Reader>()?)?;
         {
@@ -366,7 +374,23 @@ impl Registry {
                 status.set_publish_date(chrono::Utc::now().timestamp());
             }
         }
-        write_message(&self.package_dir(id)?.join("status"), &message)
+        write_message(&self.package_dir(id)?.join("status"), &message)?;
+        if matches!(
+            message
+                .get_root_as_reader::<s::submission_status::Reader>()?
+                .which()?,
+            s::submission_status::Approved(_)
+        ) {
+            self.remember_approval(id)?;
+        }
+        Ok(())
+    }
+    fn remember_approval(&self, id: &str) -> Result<()> {
+        let marker = self.package_dir(id)?.join("ever-approved");
+        if !marker.exists() {
+            atomic_write(&marker, b"")?;
+        }
+        Ok(())
     }
     // A pin only applies while its release is approved and the author permits publication.
     // Otherwise use the newest eligible release, without overriding author withdrawal.
@@ -390,8 +414,14 @@ impl Registry {
                     entry.insert(self.release_pin(&app_id)?)
                 }
             };
+            let status = self.status(&id)?;
+            let state = status.get_root::<s::submission_status::Reader>()?;
+            let ever_approved = state.get_publish_date() != 0
+                || matches!(state.which()?, s::submission_status::Approved(_))
+                || self.package_dir(&id)?.join("ever-approved").is_file();
             releases.push(Release {
-                status: self.status(&id)?,
+                status,
+                ever_approved,
                 version: info.get_version(),
                 id,
                 app_id,
@@ -425,6 +455,21 @@ impl Registry {
         let started = std::time::Instant::now();
         let releases = self.releases()?;
         let selected = selected_releases(&releases)?;
+        let previously_approved: std::collections::BTreeSet<_> = releases
+            .iter()
+            .filter(|release| release.ever_approved)
+            .map(|release| release.app_id.as_str())
+            .collect();
+        let mut newest_approved = BTreeMap::<&str, u32>::new();
+        for release in &releases {
+            let status = release.status.get_root::<s::submission_status::Reader>()?;
+            if status.get_request_state()? == s::SubmissionState::Publish
+                && matches!(status.which()?, s::submission_status::Approved(_))
+            {
+                let version = newest_approved.entry(&release.app_id).or_default();
+                *version = (*version).max(release.version);
+            }
+        }
         let overrides = self.description_overrides()?;
         tracing::info!(packages = releases.len(), "Rebuilding public catalog");
         let catalog = self.root.join("catalog");
@@ -444,7 +489,18 @@ impl Registry {
             }
             let entries = match status.reborrow().which()? {
                 s::submission_status::Approved(_) => &mut approved,
-                s::submission_status::Pending(()) => &mut pending,
+                s::submission_status::Pending(()) => {
+                    // First submissions stay entirely private. Pending updates must
+                    // also be newer than approved public releases (including pins).
+                    if !previously_approved.contains(release.app_id.as_str())
+                        || newest_approved
+                            .get(release.app_id.as_str())
+                            .is_some_and(|version| release.version <= *version)
+                    {
+                        continue;
+                    }
+                    &mut pending
+                }
                 _ => continue,
             };
             let entry =

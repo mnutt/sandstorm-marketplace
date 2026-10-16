@@ -113,10 +113,22 @@ address before distributing the package. Increment `APP_VERSION` and update
 The **reviewer** role can inspect submissions; **approver** can approve, reject,
 and rebuild the catalog. Submission access alone does not grant review access.
 `spk publish --status`, `--embargo`, and `--remove` retain their existing meanings.
-Pending packages requested for publication appear in `experimental/index.json`
-and have public downloads; embargoed packages do not. Unapproval moves a release
-back to experimental; rejection or author withdrawal removes it from public
-output. Older still-published versions remain downloadable.
+Pending updates requested for publication appear in `experimental/index.json`
+and have public downloads only after the app has had an approved release.
+First-time submissions stay private, including their metadata, images, and SPKs,
+until approval. Embargoed, withdrawn, and rejected releases stay out of public
+output. Older approved, still-published versions remain downloadable.
+
+Add `?experimental=true` to the marketplace URL to opt into pending updates.
+The listing contains only apps with a newer eligible pending release; apps
+without a pending update are omitted. App detail pages show that pending
+release’s description, images, and SPK download/install URLs. Search, category links, app pages, and installation links
+preserve this mode and the chosen Sandstorm host. Normal URLs (or
+`?experimental=false`) use the approved catalog. Pending versions older than an
+approved public release are excluded, including while a rollback is selected.
+Approval history survives revocation and restarts in each package's
+`ever-approved` marker; existing approved statuses and publication dates also
+establish history.
 
 To use this marketplace for a Sandstorm installation, set its App Market URL
 and App Index URL to the public site URL in the server's configuration.
@@ -126,7 +138,7 @@ and App Index URL to the public site URL in the server's configuration.
 /app/<appId>/             static app detail page
 /apps/index.json          approved app summaries
 /apps/<appId>.json         app details
-/experimental/index.json  pending publication requests
+/experimental/index.json  eligible pending updates
 /images/<imageId>          icons and screenshots
 /packages/<packageId>      signed SPK downloads
 ```
@@ -243,7 +255,8 @@ indexes are included in the archive.
 4. On success, the submission list refreshes and the import form disappears.
    Open the **Public marketplace** link and check the catalog and an app detail
    page. Approved releases appear in the main catalog; experimental releases
-   remain pending and public in `experimental/index.json`.
+   remain pending; updates to approved apps appear in `experimental/index.json`.
+   Experimental-only apps with no approval history remain private.
 
 The import endpoint is part of the private grain UI. `spk publish --webkey` is
 for individual author SPK submissions. In `spk dev`, rebuild with
@@ -266,7 +279,7 @@ packages and renders the site in temporary storage before committing them.
 Use the sync-generated archive rather than tarring the mirror directory, which
 contains extra paths the importer does not accept.
 
-Approved listings become approved and public; experimental listings remain
+Approved listings become approved and public; eligible experimental listings remain
 pending and public. Metadata and images are regenerated from signed manifests;
 public catalog author profiles and editorial overrides are not imported.
 Publication dates start at import time. Historical releases, embargoed packages,

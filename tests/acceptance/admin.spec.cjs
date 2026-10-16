@@ -155,3 +155,56 @@ test('malformed signed submissions are rejected before affecting the catalog', a
   await page.goto('/admin/');
   await expect(page.getByRole('table')).toBeVisible();
 });
+
+
+test('experimental mode filters to pending updates and preserves mode through navigation', async ({ page, request }) => {
+  const newId = await (await request.post('/__test/new-app')).text();
+  const rows = await queue(request);
+  const pending = rows.find(row => row.app.versionNumber === 3);
+  const stable = rows.find(row => row.app.versionNumber === 2);
+  const firstTime = rows.find(row => row.app.packageId === newId);
+  expect((await request.get(`/packages/${newId}`)).status()).toBe(404);
+  expect((await request.get(`/experimental/${firstTime.app.appId}.json`)).status()).toBe(404);
+  const index = await (await request.get('/experimental/index.json')).json();
+  expect(index.apps.map(app => app.packageId)).toEqual([pending.app.packageId]);
+
+  await request.post(`/admin/approve/${newId}`);
+  await page.goto('/');
+  await expect(page.locator('[data-install]')).toHaveCount(2);
+  await expect(page.locator(`[data-install][data-package-id="${stable.app.packageId}"]`)).toHaveCount(1);
+  await page.goto('/?experimental=false');
+  await expect(page.locator('[data-install]')).toHaveCount(2);
+  await page.goto('/?experimental=true&host=https%3A%2F%2Fsandstorm.example');
+  await expect(page.getByRole('status')).toContainText('Experimental mode');
+  await expect(page.locator('[data-install]')).toHaveAttribute('data-package-id', pending.app.packageId);
+  await expect(page.getByText('Unreviewed app')).toHaveCount(0);
+  await page.locator(`[data-tag="${pending.app.categories[0]}"]`).click();
+  await expect(page).toHaveURL(/experimental=true/);
+  await expect(page.locator('[data-install]')).toHaveAttribute('data-package-id', pending.app.packageId);
+  await page.getByRole('searchbox', { name: 'Search apps' }).fill('Rust');
+  await page.getByRole('searchbox', { name: 'Search apps' }).press('Enter');
+  await expect(page).toHaveURL(/experimental=true/);
+  await page.locator('.card-link').click();
+  await expect(page.getByRole('status')).toHaveText('Experimental release · Pending approval');
+  await expect(page.locator('.description-body')).toHaveText(/Description for build 3/);
+  await expect(page.locator('.description-body')).not.toHaveText(/Description for build 2/);
+  await expect(page.locator('.icon')).toHaveAttribute('src', `/images/${pending.app.imageId}`);
+  const install = new URL(await page.locator('[data-install]').getAttribute('href'));
+  expect(install.pathname).toBe(`/install/${pending.app.packageId}`);
+  expect(install.searchParams.get('url')).toBe(`http://127.0.0.1:9940/packages/${pending.app.packageId}`);
+  await expect(page.getByRole('link', { name: 'Download SPK' })).toHaveAttribute('href', `/packages/${pending.app.packageId}`);
+  await page.locator('.shot-button').click();
+  await expect(page.locator('#lightbox')).toHaveAttribute('aria-hidden', 'false');
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('link', { name: 'Back to all apps' }).click();
+  await expect(page).toHaveURL(/experimental=true/);
+  await expect(page).toHaveURL(/host=/);
+  await request.post(`/admin/reject/${pending.app.packageId}`, { data: 'Not ready' });
+  await page.reload();
+  await expect(page.locator('[data-install]')).toHaveCount(0);
+  await expect(page.getByText('No matching apps.')).toBeVisible();
+  await page.goto(`/app/${pending.app.appId}/?experimental=true`);
+  await expect(page.getByRole('heading', { name: 'No pending update' })).toBeVisible();
+  await expect(page.locator('[data-install]')).toHaveCount(0);
+  expect((await request.get(`/packages/${pending.app.packageId}`)).status()).toBe(404);
+});

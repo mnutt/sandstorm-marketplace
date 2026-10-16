@@ -47,6 +47,7 @@ enum Command {
 #[template(path = "home.html")]
 struct HomeTemplate<'a> {
     show_welcome: bool,
+    experimental: bool,
     search_action: String,
     tags: Vec<TagChip>,
     apps: Vec<ListingApp<'a>>,
@@ -62,6 +63,7 @@ struct AppTemplate<'a> {
     icon_url: String,
     screenshots: Vec<ListingScreenshot>,
     preview: bool,
+    experimental: bool,
     public_download: bool,
     root: &'static str,
     package_url: String,
@@ -130,10 +132,16 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-fn render_app(index: &LoadedAppIndex, app: &AppSummary, package_base_url: &str) -> Result<String> {
-    let details = index.load_details(&app.app_id)?;
-    let mut template = app_template(app, &details);
+fn render_app(
+    index: &LoadedAppIndex,
+    app: &AppSummary,
+    details: &AppDetailsForMarket,
+    package_base_url: &str,
+    experimental: bool,
+) -> Result<String> {
+    let mut template = app_template(app, details);
     template.tags = build_tag_chips(index, None, "");
+    template.experimental = experimental;
     template.package_url = join_url(package_base_url, &app.package_id);
     Ok(template.render()?)
 }
@@ -178,6 +186,7 @@ fn app_template<'a>(app: &'a AppSummary, details: &'a AppDetailsForMarket) -> Ap
             })
             .collect(),
         preview: false,
+        experimental: false,
         public_download: true,
         root: "/",
         package_url: format!("/packages/{}", app.package_id),

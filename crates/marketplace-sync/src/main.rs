@@ -127,18 +127,6 @@ async fn sync_remote(
         image_ids.extend(details.image_ids().map(ToOwned::to_owned));
     }
 
-    for (position, image_id) in image_ids.iter().enumerate() {
-        tracing::info!(
-            current = position + 1,
-            total = image_ids.len(),
-            image_id,
-            "Fetching image"
-        );
-        let image_url = format!("{}/images/{}", base_url.trim_end_matches('/'), image_id);
-        let image_bytes = fetch_bytes(&client, &image_url).await?;
-        fs::write(output_dir.join("images").join(image_id), image_bytes).await?;
-    }
-
     if include_experimental {
         let experimental_url =
             format!("{}/experimental/index.json", base_url.trim_end_matches('/'));
@@ -157,6 +145,39 @@ async fn sync_remote(
             serde_json::to_vec(&experimental)?,
         )
         .await?;
+        image_ids.extend(experimental.image_ids().into_iter().map(ToOwned::to_owned));
+        for app in &experimental.apps {
+            let bytes = fetch_bytes(
+                &client,
+                &format!(
+                    "{}/experimental/{}.json",
+                    base_url.trim_end_matches('/'),
+                    app.app_id
+                ),
+            )
+            .await?;
+            let details: AppDetailsForMarket = serde_json::from_slice(&bytes)?;
+            image_ids.extend(details.image_ids().map(ToOwned::to_owned));
+            fs::write(
+                output_dir
+                    .join("experimental")
+                    .join(format!("{}.json", app.app_id)),
+                bytes,
+            )
+            .await?;
+        }
+    }
+
+    for (position, image_id) in image_ids.iter().enumerate() {
+        tracing::info!(
+            current = position + 1,
+            total = image_ids.len(),
+            image_id,
+            "Fetching image"
+        );
+        let image_url = format!("{}/images/{}", base_url.trim_end_matches('/'), image_id);
+        let image_bytes = fetch_bytes(&client, &image_url).await?;
+        fs::write(output_dir.join("images").join(image_id), image_bytes).await?;
     }
 
     tracing::info!(apps = loaded.index.apps.len(), images = image_ids.len(), output = %output_dir.display(), elapsed_ms = started.elapsed().as_millis() as u64, "Catalog sync complete");
@@ -308,6 +329,49 @@ mod tests {
         assert_eq!(remaining, Some(0));
         assert!(Cli::try_parse_from(["sync", "sync-remote", "--limit=0"]).is_err());
         assert!(Cli::try_parse_from(["sync", "sync-remote", "--limit=10"]).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mirror_fetches_pending_descriptions_and_images() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = |version, image| serde_json::json!({"appId":"test", "name":"Test", "version":"1", "versionNumber":version, "packageId":format!("{version:032x}"), "isOpenSource":true, "author":null, "imageId": image});
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let responses = [
+            ("/apps/index.json", serde_json::json!({"apps":[app(1, "")]}).to_string()),
+            ("/apps/test.json", "{}".into()),
+            ("/experimental/index.json", serde_json::json!({"apps":[app(2, "beta.svg")]}).to_string()),
+            ("/experimental/test.json", serde_json::json!({"description":"Pending description", "screenshots":[{"imageId":"shot.png", "width":1, "height":1}]}).to_string()),
+            ("/images/beta.svg", "<svg/>".into()),
+            ("/images/shot.png", "fixture".into()),
+        ];
+        let server = std::thread::spawn(move || {
+            for (path, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..n]).starts_with(&format!("GET {path} "))
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        sync_remote(&url, dir.path(), true, None).await?;
+        server.join().unwrap();
+        let details: AppDetailsForMarket =
+            serde_json::from_slice(&fs::read(dir.path().join("experimental/test.json")).await?)?;
+        assert_eq!(details.description, "Pending description");
+        assert!(dir.path().join("images/beta.svg").is_file());
+        assert!(dir.path().join("images/shot.png").is_file());
         Ok(())
     }
 

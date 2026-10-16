@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
 use askama::Template;
-use marketplace_model::app_index::LoadedAppIndex;
+use marketplace_model::app_index::{AppDetailsForMarket, AppIndexForMarket, LoadedAppIndex};
 
 use crate::{HomeTemplate, build_tag_chips, listing, render_app};
 
@@ -74,71 +74,105 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
             copy_flat_directory(&path, &stage.join(directory))?;
         }
     }
-    let mut known = std::collections::BTreeSet::new();
-    for app in &index.index.apps {
-        safe_name(&app.app_id)?;
-        safe_name(&app.package_id)?;
-        ensure!(known.insert(&app.app_id), "duplicate app ID");
+    let experimental_path = source.join("experimental/index.json");
+    let experimental: AppIndexForMarket = if experimental_path.exists() {
+        serde_json::from_slice(&fs::read(experimental_path)?)?
+    } else {
+        AppIndexForMarket { apps: Vec::new() }
+    };
+    let mut merged: std::collections::BTreeMap<_, _> = index
+        .index
+        .apps
+        .iter()
+        .map(|app| (app.app_id.clone(), app.clone()))
+        .collect();
+    ensure!(merged.len() == index.index.apps.len(), "duplicate app ID");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut updates = LoadedAppIndex {
+        root: source.to_owned(),
+        index: AppIndexForMarket { apps: Vec::new() },
+    };
+    let mut experimental_ids = std::collections::BTreeSet::new();
+    for app in experimental.apps {
         ensure!(
-            package_base.is_some() || stage.join("packages").join(&app.package_id).is_file(),
-            "missing package {}",
-            app.package_id
+            seen.insert(app.app_id.clone()),
+            "duplicate experimental app ID"
         );
-        if !app.image_id.is_empty() {
-            require_image(stage, &app.image_id)?;
+        if merged
+            .get(&app.app_id)
+            .is_none_or(|stable| app.version_number > stable.version_number)
+        {
+            experimental_ids.insert(app.app_id.clone());
+            updates.index.apps.push(app.clone());
+            merged.insert(app.app_id.clone(), app);
         }
-        for screenshot in index.load_details(&app.app_id)?.screenshots {
-            require_image(stage, &screenshot.image_id)?;
-        }
-        let directory = stage.join("app").join(&app.app_id);
-        fs::create_dir_all(&directory)?;
-        write(
-            &directory.join("index.html"),
-            render_app(&index, app, package_base.unwrap_or("/packages"))?,
-        )?;
     }
-    let template = HomeTemplate {
-        show_welcome: true,
-        search_action: "/".to_string(),
-        tags: build_tag_chips(&index, None, ""),
-        apps: index
+    updates.index.apps.sort_by(|a, b| a.name.cmp(&b.name));
+    let base = package_base.unwrap_or("/packages");
+    for app in merged.values() {
+        safe_name(&app.app_id)?;
+        let stable = index
             .index
             .apps
             .iter()
-            .map(|app| listing(app, package_base.unwrap_or("/packages")))
-            .collect(),
-        search: String::new(),
-    };
+            .find(|stable| stable.app_id == app.app_id);
+        let approved_page = if let Some(stable) = stable {
+            let details = index.load_details(&stable.app_id)?;
+            validate_listing(stage, stable, &details, package_base.is_some())?;
+            render_app(&index, stable, &details, base, false)?
+        } else {
+            unavailable_page("No approved public release")
+        };
+        let page = if experimental_ids.contains(&app.app_id) {
+            let details: AppDetailsForMarket = serde_json::from_slice(&fs::read(
+                source
+                    .join("experimental")
+                    .join(format!("{}.json", app.app_id)),
+            )?)?;
+            validate_listing(stage, app, &details, package_base.is_some())?;
+            with_experimental(
+                approved_page,
+                render_app(&updates, app, &details, base, true)?,
+            )?
+        } else {
+            with_experimental(approved_page, unavailable_page("No pending update"))?
+        };
+        let directory = stage.join("app").join(&app.app_id);
+        fs::create_dir_all(&directory)?;
+        write(&directory.join("index.html"), page)?;
+    }
     write(
         &stage.join("marketplace.js"),
         include_str!("../static/marketplace.js"),
     )?;
-    write(&stage.join("index.html"), template.render()?)?;
-    for tag in template.tags.iter().filter(|tag| tag.name != "All") {
-        // These names become actual directory components, not URL-encoded filenames.
+    write(
+        &stage.join("index.html"),
+        with_experimental(
+            home(&index, None, base, false)?,
+            home(&updates, None, base, true)?,
+        )?,
+    )?;
+    let categories: std::collections::BTreeSet<_> = index
+        .index
+        .apps
+        .iter()
+        .chain(&updates.index.apps)
+        .flat_map(|app| &app.categories)
+        .collect();
+    for name in categories {
         ensure!(
-            !tag.name.is_empty()
-                && tag.name != "."
-                && tag.name != ".."
-                && !tag.name.contains(['/', '\\', '\0']),
+            !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']),
             "invalid category name"
         );
-        let directory = stage.join("genre").join(&tag.name);
+        let directory = stage.join("genre").join(&name);
         fs::create_dir_all(&directory)?;
-        let category = HomeTemplate {
-            show_welcome: false,
-            search_action: crate::home_href(Some(&tag.name), ""),
-            tags: build_tag_chips(&index, Some(&tag.name), ""),
-            apps: index
-                .index
-                .apps
-                .iter()
-                .filter(|app| app.categories.contains(&tag.name))
-                .map(|app| listing(app, package_base.unwrap_or("/packages")))
-                .collect(),
-            search: String::new(),
-        };
-        write(&directory.join("index.html"), category.render()?)?;
+        write(
+            &directory.join("index.html"),
+            with_experimental(
+                home(&index, Some(name), base, false)?,
+                home(&updates, Some(name), base, true)?,
+            )?,
+        )?;
     }
     if stage.join("genre").exists() {
         fs::File::open(stage.join("genre"))?.sync_all()?;
@@ -151,6 +185,76 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
         fs::File::open(stage.join("app"))?.sync_all()?;
     }
     fs::File::open(stage)?.sync_all()?;
+    Ok(())
+}
+
+fn unavailable_page(message: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Marketplace</title><link rel=\"stylesheet\" href=\"/assets/marketplace.css\"></head><body><main><h1>{message}</h1><a href=\"/\">Back to all apps</a></main><script src=\"/marketplace.js\" defer></script></body></html>"
+    )
+}
+
+fn home(
+    index: &LoadedAppIndex,
+    tag: Option<&str>,
+    base: &str,
+    experimental: bool,
+) -> Result<String> {
+    Ok(HomeTemplate {
+        show_welcome: tag.is_none(),
+        search_action: crate::home_href(tag, ""),
+        tags: build_tag_chips(index, tag, ""),
+        apps: index
+            .index
+            .apps
+            .iter()
+            .filter(|app| {
+                tag.is_none_or(|tag| app.categories.iter().any(|category| category == tag))
+            })
+            .map(|app| listing(app, base))
+            .collect(),
+        search: String::new(),
+        experimental,
+    }
+    .render()?)
+}
+
+// Both variants are rendered by the same templates. The browser selects the
+// opt-in body before binding search/install/lightbox behavior; no JSON renderer
+// or separate experimental routes are needed.
+fn with_experimental(stable: String, experimental: String) -> Result<String> {
+    let body = experimental
+        .split_once("<body>")
+        .context("missing template body")?
+        .1
+        .rsplit_once("</body>")
+        .context("missing template body end")?
+        .0;
+    Ok(stable.replace(
+        "</body>",
+        &format!("<template id=\"experimental-page\">{body}</template></body>"),
+    ))
+}
+
+fn validate_listing(
+    stage: &Path,
+    app: &marketplace_model::app_index::AppSummary,
+    details: &AppDetailsForMarket,
+    remote_packages: bool,
+) -> Result<()> {
+    safe_name(&app.app_id)?;
+    safe_name(&app.package_id)?;
+    ensure!(
+        remote_packages || stage.join("packages").join(&app.package_id).is_file(),
+        "missing package {}",
+        app.package_id
+    );
+    if !app.image_id.is_empty() {
+        require_image(stage, &app.image_id)?;
+    }
+    for shot in &details.screenshots {
+        require_image(stage, &shot.image_id)?;
+    }
     Ok(())
 }
 
