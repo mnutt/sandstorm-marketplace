@@ -171,7 +171,7 @@ impl Fixture {
         }
         // The Sandstorm shell owns installation; verify the browser opens its
         // expected URL without implementing an installer in the test adapter.
-        if path.starts_with("/install/") {
+        if path.starts_with("/install/") || path == "/apps" {
             return Ok(response(
                 200,
                 "text/html",

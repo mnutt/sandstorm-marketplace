@@ -60,6 +60,10 @@ struct AppTemplate<'a> {
     app: &'a AppSummary,
     details: &'a AppDetailsForMarket,
     icon_url: String,
+    screenshots: Vec<ListingScreenshot>,
+    preview: bool,
+    public_download: bool,
+    root: &'static str,
     package_url: String,
     home_href: String,
     categories: String,
@@ -70,6 +74,12 @@ struct AppTemplate<'a> {
     website_url: String,
     source_url: String,
     description_html: String,
+}
+
+struct ListingScreenshot {
+    url: String,
+    width: u32,
+    height: u32,
 }
 
 struct ListingApp<'a> {
@@ -122,12 +132,55 @@ pub async fn run() -> Result<()> {
 
 fn render_app(index: &LoadedAppIndex, app: &AppSummary, package_base_url: &str) -> Result<String> {
     let details = index.load_details(&app.app_id)?;
-    let template = AppTemplate {
-        tags: build_tag_chips(index, None, ""),
+    let mut template = app_template(app, &details);
+    template.tags = build_tag_chips(index, None, "");
+    template.package_url = join_url(package_base_url, &app.package_id);
+    Ok(template.render()?)
+}
+
+/// Render a submitted release using the public listing template, with private
+/// downloads and embedded images. No files are published by this operation.
+pub fn render_preview(
+    app: &AppSummary,
+    details: &AppDetailsForMarket,
+    images: &BTreeMap<String, String>,
+    public_download: bool,
+) -> Result<String> {
+    let mut template = app_template(app, details);
+    template.preview = true;
+    template.public_download = public_download;
+    template.root = "../";
+    template.home_href = format!("../#app/{}", app.app_id);
+    template.package_url = format!("../download/{}", app.package_id);
+    template.icon_url = images.get(&app.image_id).cloned().unwrap_or_default();
+    for (shot, source) in template.screenshots.iter_mut().zip(&details.screenshots) {
+        shot.url = images.get(&source.image_id).cloned().unwrap_or_default();
+    }
+    if app.created_at.is_empty() {
+        template.updated_at = "Not published yet".into();
+    }
+    Ok(template.render()?)
+}
+
+fn app_template<'a>(app: &'a AppSummary, details: &'a AppDetailsForMarket) -> AppTemplate<'a> {
+    AppTemplate {
+        tags: Vec::new(),
         app,
-        details: &details,
-        icon_url: index.image_url(&app.image_id),
-        package_url: join_url(package_base_url, &app.package_id),
+        details,
+        icon_url: format!("/images/{}", app.image_id),
+        screenshots: details
+            .screenshots
+            .iter()
+            .map(|shot| ListingScreenshot {
+                url: format!("/images/{}", shot.image_id),
+                width: shot.width,
+                height: shot.height,
+            })
+            .collect(),
+        preview: false,
+        public_download: true,
+        root: "/",
+        package_url: format!("/packages/{}", app.package_id),
         home_href: "/".to_string(),
         categories: if app.categories.is_empty() {
             "Other".to_string()
@@ -146,8 +199,7 @@ fn render_app(index: &LoadedAppIndex, app: &AppSummary, package_base_url: &str) 
         website_url: safe_web_url(&app.web_link),
         source_url: safe_web_url(&app.code_link),
         description_html: render_description_html(&details.description),
-    };
-    Ok(template.render()?)
+    }
 }
 
 fn listing<'a>(app: &'a AppSummary, package_base_url: &str) -> ListingApp<'a> {
@@ -396,4 +448,8 @@ mod route_tests {
         );
         assert_eq!(home_href(None, "editor"), "/?q=editor");
     }
+}
+
+pub fn marketplace_script() -> &'static [u8] {
+    include_bytes!("../static/marketplace.js")
 }

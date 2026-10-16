@@ -143,3 +143,11 @@ main { max-width: 100rem; margin: auto; padding: 3rem 2rem 4rem clamp(1rem, 5vw,
   .grid { gap: 1rem .6rem; }
   .grid article { padding: .6rem; }
 }
+
+.preview-notice { padding: .75rem 1rem; border-left: 3px solid var(--accent); background: #f5eef7; }
+.install-dialog { width: min(32rem, calc(100% - 2rem)); padding: 1.5rem; border: 1px solid var(--line); border-radius: .4rem; color: var(--ink); }
+.install-dialog::backdrop { background: #302b3680; }
+.install-dialog h2 { margin-top: 0; }
+.install-dialog label { display: block; margin-top: 1rem; }
+.install-dialog input { width: 100%; padding: .6rem; margin: .35rem 0 1rem; border: 1px solid var(--line); }
+.install-dialog [role="alert"] { color: #942c3b; }

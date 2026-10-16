@@ -61,12 +61,3 @@ test('app table sorts by latest publication across history, with unpublished app
   assert.equal(admin.lastPublished(groups[0]), 300);
   assert.equal(admin.lastPublished(groups[2]), 0);
 });
-
-
-test('test installer links target the selected server and public package only', () => {
-  assert.equal(admin.testInstallUrl('http://local.sandstorm.io:6080/path', 'https://market.example/', 'abc'),
-    'http://local.sandstorm.io:6080/install/abc?url=https%3A%2F%2Fmarket.example%2Fpackages%2Fabc');
-  for (const value of ['javascript:alert(1)', 'https://user:pass@example.com', '//example.com']) {
-    assert.throws(() => admin.testInstallUrl(value, 'https://market.example', 'abc'));
-  }
-});

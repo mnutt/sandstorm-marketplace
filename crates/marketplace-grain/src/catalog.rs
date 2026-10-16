@@ -16,6 +16,29 @@ struct Asset<'a> {
     data: &'a [u8],
 }
 impl Entry<'_> {
+    pub fn image_data_urls(&self) -> std::collections::BTreeMap<String, String> {
+        use base64::Engine;
+        self.assets
+            .iter()
+            .map(|asset| {
+                let mime = if asset.name.ends_with(".svg") {
+                    "image/svg+xml"
+                } else if asset.name.ends_with(".png") {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                (
+                    asset.name.clone(),
+                    format!(
+                        "data:{mime};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(asset.data)
+                    ),
+                )
+            })
+            .collect()
+    }
+
     pub fn write_assets(&self, catalog: &Path) -> Result<()> {
         for asset in &self.assets {
             let path = catalog.join("images").join(&asset.name);

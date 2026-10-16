@@ -118,6 +118,9 @@ impl web::Server for Session {
                             None => not_found(results.get()),
                         }
                     }
+                    "marketplace.js" => content(results.get(), "text/javascript; charset=utf-8", marketplace_web::marketplace_script()),
+                    "preview.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("preview.js")),
+                    path if path.starts_with("preview/") => content(results.get(), "text/html; charset=utf-8", registry.preview(&path[8..])?.as_bytes()),
                     "review.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("review.js")),
                     path if path.starts_with("download/") => {
                         let id = &path[9..];

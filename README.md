@@ -160,10 +160,17 @@ author still requests publication. This changes the public catalog listing;
 it does not downgrade installed grains or remove other approved downloads.
 Reject a faulty release separately if its download must be removed.
 
-Reviewers and approvers can use **Download SPK** on any release, including an
-embargoed or rejected package, then upload it into their Sandstorm server and
-create a test grain. Downloads stream through the authenticated administration
-session; submitter API tokens cannot download private packages.
+Use **Preview listing** on a release to see its marketplace page before approving
+or publishing it. The preview uses the public listing template, including the
+icon, screenshots, description, and version, but is only available through an
+authenticated reviewer or approver session. Previewing does not change approval
+or publication state; private images are embedded rather than published.
+
+The preview includes **Download SPK** and **Install for testing**. Downloads
+stream through the authenticated administration session; submitter API tokens
+cannot preview or download private packages. For an embargoed or rejected
+release, Install explains how to download the SPK and upload it using **Upload
+app** on your Sandstorm server's Apps page, with a button to open that page.
 
 For releases with a public package download, **Install for testing** asks for
 your Sandstorm server URL and opens that server's installer in a new tab. It

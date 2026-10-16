@@ -47,6 +47,13 @@ pub fn package_with_description(version: u32, malformed: bool) -> Vec<u8> {
             .reborrow()
             .init_categories(1)
             .set(0, p::Category::DeveloperTools);
+        metadata.reborrow().init_icons().init_market().set_svg(&format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"><text x=\"5\" y=\"30\">{version}</text></svg>"));
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
+        let mut shot = metadata.reborrow().init_screenshots(1).get(0);
+        shot.set_png(&png);
+        shot.set_width(1);
+        shot.set_height(1);
         metadata
             .init_license()
             .set_open_source(p::OpenSourceLicense::Apache2);

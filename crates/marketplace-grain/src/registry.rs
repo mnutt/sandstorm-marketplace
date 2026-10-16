@@ -492,6 +492,31 @@ impl Registry {
         );
         Ok(())
     }
+    pub fn preview(&self, id: &str) -> Result<String> {
+        ensure!(
+            self.package_dir(id)?.join("spk").is_file(),
+            "package not uploaded"
+        );
+        let metadata = self.metadata(id)?;
+        let status = self.status(id)?;
+        let published = status
+            .get_root::<s::submission_status::Reader>()?
+            .get_publish_date();
+        let mut entry = self.catalog_entry(metadata.get_root()?, published)?;
+        if let Some(description) = self.description_overrides()?.get(&entry.app.app_id) {
+            entry.app.short_description = description.clone();
+        }
+        if published == 0 {
+            entry.app.created_at.clear();
+        }
+        marketplace_web::render_preview(
+            &entry.app,
+            &entry.details,
+            &entry.image_data_urls(),
+            self.root.join("www/packages").join(id).is_file(),
+        )
+    }
+
     pub fn queue(&self) -> Result<Vec<ReviewRelease>> {
         let mut queue = Vec::new();
         let releases = self.releases()?;
