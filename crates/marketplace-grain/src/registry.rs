@@ -47,6 +47,40 @@ pub struct ReviewRelease {
 }
 
 pub type Message = Reader<serialize::OwnedSegments>;
+// One operation's view of persisted releases. Never retained between requests.
+struct Release {
+    id: String,
+    app_id: String,
+    version: u32,
+    pin: String,
+    metadata: Message,
+    status: Message,
+}
+impl Release {
+    fn pinned(&self) -> bool {
+        self.pin == self.id
+    }
+}
+
+fn selected_releases(releases: &[Release]) -> Result<BTreeMap<&str, &Release>> {
+    let mut selected = BTreeMap::<&str, &Release>::new();
+    for release in releases {
+        let status = release.status.get_root::<s::submission_status::Reader>()?;
+        if status.get_request_state()? != s::SubmissionState::Publish
+            || !matches!(status.which()?, s::submission_status::Approved(_))
+        {
+            continue;
+        }
+        if selected
+            .get(release.app_id.as_str())
+            .is_none_or(|old| release.pinned() || (!old.pinned() && release.version > old.version))
+        {
+            selected.insert(&release.app_id, release);
+        }
+    }
+    Ok(selected)
+}
+
 #[derive(Clone)]
 pub struct Registry {
     pub root: PathBuf,
@@ -272,17 +306,13 @@ impl Registry {
                         && matches!(status.which()?, s::submission_status::Approved(_)),
                     "only approved releases requested for publication can be selected"
                 );
-                let current = self.selected_releases()?;
-                let current_id = current
-                    .get(&app_id)
+                let releases = self.releases()?;
+                let selected = selected_releases(&releases)?;
+                let current = selected
+                    .get(app_id.as_str())
                     .context("app has no published release")?;
-                let current_metadata = self.metadata(current_id)?;
                 ensure!(
-                    self.release_pin(&app_id)? == id
-                        || info.get_version()
-                            < current_metadata
-                                .get_root::<p::verified_info::Reader>()?
-                                .get_version(),
+                    current.pin == id || info.get_version() < current.version,
                     "rollback must select an older release than the current public version"
                 );
             }
@@ -347,37 +377,56 @@ impl Registry {
             Err(err) => Err(err.into()),
         }
     }
-    fn selected_releases(&self) -> Result<BTreeMap<String, String>> {
-        let mut selected = BTreeMap::<String, (String, u32, bool)>::new();
+    fn releases(&self) -> Result<Vec<Release>> {
+        let mut pins = BTreeMap::new();
+        let mut releases = Vec::new();
         for id in self.package_ids()? {
-            let status = self.status(&id)?;
-            let status = status.get_root::<s::submission_status::Reader>()?;
-            if status.get_request_state()? != s::SubmissionState::Publish
-                || !matches!(status.which()?, s::submission_status::Approved(_))
-            {
-                continue;
-            }
             let metadata = self.metadata(&id)?;
             let info = metadata.get_root::<p::verified_info::Reader>()?;
             let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
-            let pinned = self.release_pin(&app_id)? == id;
-            if selected.get(&app_id).is_none_or(|(_, version, old_pin)| {
-                pinned || (!old_pin && info.get_version() > *version)
-            }) {
-                selected.insert(app_id, (id, info.get_version(), pinned));
-            }
+            let pin = match pins.entry(app_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(self.release_pin(&app_id)?)
+                }
+            };
+            releases.push(Release {
+                status: self.status(&id)?,
+                version: info.get_version(),
+                id,
+                app_id,
+                pin: pin.clone(),
+                metadata,
+            });
         }
-        Ok(selected
-            .into_iter()
-            .map(|(app, (id, _, _))| (app, id))
-            .collect())
+        Ok(releases)
+    }
+
+    fn description_overrides(&self) -> Result<BTreeMap<String, String>> {
+        let path = self.root.join("descriptions");
+        if !path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let message = read_message(&path)?;
+        message
+            .get_root::<a::short_description_overrides::Reader>()?
+            .get_items()?
+            .iter()
+            .map(|item| {
+                Ok((
+                    item.get_app_id()?.to_str()?.to_owned(),
+                    item.get_short_description()?.to_str()?.to_owned(),
+                ))
+            })
+            .collect()
     }
     #[tracing::instrument(skip_all, err(Debug))]
     pub fn publish(&self) -> Result<()> {
         let started = std::time::Instant::now();
-        let packages = self.package_ids()?;
-        let selected = self.selected_releases()?;
-        tracing::info!(packages = packages.len(), "Rebuilding public catalog");
+        let releases = self.releases()?;
+        let selected = selected_releases(&releases)?;
+        let overrides = self.description_overrides()?;
+        tracing::info!(packages = releases.len(), "Rebuilding public catalog");
         let catalog = self.root.join("catalog");
         if catalog.exists() {
             fs::remove_dir_all(&catalog)?;
@@ -387,9 +436,9 @@ impl Registry {
         }
         let mut approved = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
         let mut pending = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
-        for id in packages {
-            let status = self.status(&id)?;
-            let status = status.get_root::<s::submission_status::Reader>()?;
+        for release in &releases {
+            let id = &release.id;
+            let status = release.status.get_root::<s::submission_status::Reader>()?;
             if status.reborrow().get_request_state()? != s::SubmissionState::Publish {
                 continue;
             }
@@ -398,8 +447,8 @@ impl Registry {
                 s::submission_status::Pending(()) => &mut pending,
                 _ => continue,
             };
-            let metadata = self.metadata(&id)?;
-            let entry = self.catalog_entry(metadata.get_root()?, status.get_publish_date())?;
+            let entry =
+                self.catalog_entry(release.metadata.get_root()?, status.get_publish_date())?;
             entry.write_assets(&catalog)?;
             let (app, details) = (entry.app, entry.details);
             fs::hard_link(
@@ -407,7 +456,7 @@ impl Registry {
                 catalog.join("packages").join(&id),
             )?;
             if matches!(status.which()?, s::submission_status::Approved(_))
-                && selected.get(&app.app_id) != Some(&id)
+                && selected.get(app.app_id.as_str()).map(|release| &release.id) != Some(id)
             {
                 continue;
             }
@@ -421,18 +470,8 @@ impl Registry {
         for (directory, entries) in [("apps", approved), ("experimental", pending)] {
             let mut apps = Vec::new();
             for (_, (mut app, details)) in entries {
-                // Preserve overrides imported from the legacy index.
-                if self.root.join("descriptions").exists() {
-                    let overrides = read_message(&self.root.join("descriptions"))?;
-                    for item in overrides
-                        .get_root::<a::short_description_overrides::Reader>()?
-                        .get_items()?
-                    {
-                        if item.get_app_id()?.to_str()? == app.app_id {
-                            app.short_description =
-                                item.get_short_description()?.to_str()?.to_string();
-                        }
-                    }
+                if let Some(description) = overrides.get(&app.app_id) {
+                    app.short_description = description.clone();
                 }
                 atomic_write(
                     &catalog.join(directory).join(format!("{}.json", app.app_id)),
@@ -455,13 +494,13 @@ impl Registry {
     }
     pub fn queue(&self) -> Result<Vec<ReviewRelease>> {
         let mut queue = Vec::new();
-        let selected = self.selected_releases()?;
-        for id in self.package_ids()? {
-            let message = self.metadata(&id)?;
-            let info = message.get_root::<p::verified_info::Reader>()?;
-            let status = self.status(&id)?;
-            let status = status.get_root::<s::submission_status::Reader>()?;
-            let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
+        let releases = self.releases()?;
+        let selected = selected_releases(&releases)?;
+        for release in &releases {
+            let id = &release.id;
+            let info = release.metadata.get_root::<p::verified_info::Reader>()?;
+            let status = release.status.get_root::<s::submission_status::Reader>()?;
+            let app_id = release.app_id.clone();
             let entry = self
                 .catalog_entry(info, status.get_publish_date())
                 .map(|entry| (entry.app, entry.details));
@@ -498,12 +537,11 @@ impl Registry {
                 s::submission_status::NeedsUpdate(reason) => ("needsUpdate", reason?.to_str()?),
                 _ => ("pending", ""),
             };
-            let pin = self.release_pin(&app.app_id)?;
-            let current = selected.get(&app.app_id) == Some(&id);
+            let current = selected.get(app.app_id.as_str()).map(|release| &release.id) == Some(id);
             let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
             queue.push(ReviewRelease {
                 current,
-                pinned_package_id: pin,
+                pinned_package_id: release.pin.clone(),
                 public_download: self.root.join("www/packages").join(&id).is_file(),
                 received_at,
                 published_at: status.get_publish_date(),
