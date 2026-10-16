@@ -53,7 +53,9 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "/var".into());
     tracing::info!(storage = %root.display(), "Starting marketplace grain");
     let registry = Registry::new(root)?;
-    registry.publish()?;
+    if let Err(err) = registry.publish() {
+        tracing::error!(error = ?err, "Startup publication failed; administration remains available for recovery");
+    }
     tokio::task::LocalSet::new()
         .run_until(async move {
             // Sandstorm passes the connected bootstrap RPC socket on descriptor 3.

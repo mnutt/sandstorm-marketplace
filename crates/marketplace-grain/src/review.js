@@ -90,6 +90,7 @@ if (typeof document !== 'undefined') {
     const node = element('section', undefined, 'release');
     node.append(element('h3', versionName(item)), badges(item));
     node.append(element('p', `Received: ${date(item.receivedAt)} · First published: ${item.publishedAt ? date(item.publishedAt * 1000) : 'Never'}`, 'meta'));
+    if (item.validationError) node.append(element('p', `Invalid package metadata: ${item.validationError}. Reject this release to restore publication.`, 'reason'));
     if (item.reason) node.append(element('p', item.reason, 'reason'));
     const details = element('details'); details.dataset.key = `package-${item.app.packageId}`;
     details.append(element('summary', 'Package details & description'), element('p', `Package ID: ${item.app.packageId}`, 'meta'), element('p', `Contact: ${item.contactEmail || 'Not provided'} · License: ${item.details.license || 'Not provided'}`, 'meta'), element('pre', item.details.description || 'No description.', 'description'));
@@ -116,7 +117,7 @@ if (typeof document !== 'undefined') {
     if (!item.publicDownload) node.append(element('p', 'To test this private release, download the SPK and upload it to your Sandstorm server.', 'meta'));
     if (canApprove) {
       const actions = element('div', undefined, 'actions');
-      if (item.review !== 'approved') actions.append(writeButton('Approve', () => openDecision(item, 'approve'), 'primary'));
+      if (item.review !== 'approved' && !item.validationError) actions.append(writeButton('Approve', () => openDecision(item, 'approve'), 'primary'));
       if (item.review !== 'needsUpdate') actions.append(writeButton('Reject / request update', () => openDecision(item, 'reject'), 'danger'));
       if (item.review !== 'pending') actions.append(writeButton('Return to review', () => openDecision(item, 'unapprove')));
       if (canRollback(item, versions)) actions.append(writeButton('Roll back to this version', () => openDecision(item, 'rollback')));
@@ -263,13 +264,20 @@ if (typeof document !== 'undefined') {
     await runAction(async () => {
       $('decision-submit').disabled = true; $('decision-cancel').disabled = true;
       notice('decision-error', '');
+      let saved = false;
       try {
         await request(`${action}/${item.app.packageId}`, action === 'reject' ? reason : '');
+        saved = true;
         $('decision').close();
         notice('message', `Updated ${item.app.name} · ${versionName(item)}.`);
         await refresh();
       } catch (err) {
-        notice('decision-error', `${err.message} If the decision was saved but publication failed, rebuild the public site.`);
+        if (saved) {
+          notice('message', '');
+          notice('error', `The decision was saved, but the view could not refresh: ${err.message}. It will retry automatically.`);
+        } else {
+          notice('decision-error', `${err.message} If the decision was saved but publication failed, rebuild the public site.`);
+        }
       } finally { $('decision-submit').disabled = false; $('decision-cancel').disabled = false; }
     });
   };
@@ -306,7 +314,7 @@ if (typeof document !== 'undefined') {
   }).catch(err => notice('error', err.message));
   // Do not replace focused controls or interrupt a review decision during automatic refresh.
   setInterval(() => {
-    if (!document.hidden && !working && !$('decision').open && !$('install-dialog').open && document.activeElement === document.body) {
+    if (!document.hidden && !working && !$('decision').open && !$('install-dialog').open && !document.activeElement?.matches('input, textarea, select, [contenteditable="true"]')) {
       refresh().catch(err => notice('error', `Could not refresh: ${err.message}`));
     }
   }, 30000);

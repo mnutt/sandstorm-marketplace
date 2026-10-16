@@ -126,6 +126,10 @@ impl Registry {
             !short.is_empty() && short.len() < 25,
             "short description must contain 1–24 bytes"
         );
+        // Exercise the same metadata/image conversion used by publication before
+        // committing the package. A valid signature does not imply valid text or enums.
+        self.validate_catalog_entry(info)
+            .context("invalid marketplace metadata")?;
         let app = ids::app_bytes(info.get_app_id()?);
         // Check all previously published releases, including withdrawn versions.
         for previous in self.package_ids()? {
@@ -227,6 +231,11 @@ impl Registry {
     #[tracing::instrument(skip_all, fields(package_id = id, action = action), err(Debug))]
     pub fn review(&self, id: &str, action: &str, reason: &str) -> Result<()> {
         tracing::info!("Applying review decision");
+        if action == "approve" || action == "rollback" {
+            let metadata = self.metadata(id)?;
+            self.validate_catalog_entry(metadata.get_root()?)
+                .context("invalid marketplace metadata")?;
+        }
         if action == "rollback" || action == "latest" {
             let metadata = self.metadata(id)?;
             let info = metadata.get_root::<p::verified_info::Reader>()?;
@@ -430,8 +439,36 @@ impl Registry {
             let info = message.get_root::<p::verified_info::Reader>()?;
             let status = self.status(&id)?;
             let status = status.get_root::<s::submission_status::Reader>()?;
-            let (app, details) =
-                self.catalog_entry(info, status.reborrow().get_publish_date(), None)?;
+            let app_id = ids::app_id(&ids::app_bytes(info.get_app_id()?));
+            let entry = self.catalog_entry(info, status.reborrow().get_publish_date(), None);
+            let validation_error = entry.as_ref().err().map(|err| format!("{err:#}"));
+            // Older builds may have stored malformed metadata. Keep these releases
+            // visible so an approver can reject them and restore publication.
+            let (app, details) = entry.unwrap_or_else(|_| {
+                (
+                    AppSummary {
+                        app_id,
+                        package_id: id.clone(),
+                        name: format!("Invalid package {}", &id[..8]),
+                        version: String::new(),
+                        version_number: info.get_version(),
+                        image_id: String::new(),
+                        web_link: String::new(),
+                        code_link: String::new(),
+                        is_open_source: false,
+                        categories: Vec::new(),
+                        author: None,
+                        upstream_author: String::new(),
+                        short_description: "Invalid metadata".into(),
+                        created_at: String::new(),
+                    },
+                    AppDetailsForMarket {
+                        description: String::new(),
+                        screenshots: Vec::new(),
+                        license: String::new(),
+                    },
+                )
+            });
             let (review, reason) = match status.reborrow().which()? {
                 s::submission_status::Approved(_) => ("approved", ""),
                 s::submission_status::NeedsUpdate(reason) => ("needsUpdate", reason?.to_str()?),
@@ -442,10 +479,15 @@ impl Registry {
             let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
             queue.push(json!({"current": current, "pinnedPackageId": pin,
                 "publicDownload": self.root.join("www/packages").join(&id).is_file(), "receivedAt": received_at, "publishedAt": status.get_publish_date(), "app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
-                "review": review, "reason": reason, "contactEmail": info.get_metadata()?.get_author().get_contact_email()?.to_str()?,
-                "fingerprint": info.get_author_pgp_key_fingerprint()?.to_str()?}));
+                "review": review, "reason": reason, "validationError": validation_error,
+                "contactEmail": info.get_metadata()?.get_author().get_contact_email().ok().and_then(|value| value.to_str().ok()).unwrap_or(""),
+                "fingerprint": info.get_author_pgp_key_fingerprint().ok().and_then(|value| value.to_str().ok()).unwrap_or("")}));
         }
         Ok(Value::Array(queue))
+    }
+    fn validate_catalog_entry(&self, info: p::verified_info::Reader<'_>) -> Result<()> {
+        self.catalog_entry(info, 0, None)?;
+        Ok(())
     }
     fn catalog_entry(
         &self,
@@ -455,19 +497,24 @@ impl Registry {
     ) -> Result<(AppSummary, AppDetailsForMarket)> {
         let meta = info.get_metadata()?;
         let icons = meta.get_icons();
+        // Traverse image fields even for private queue/validation calls, without
+        // writing assets until a catalog destination is supplied.
+        let save_image = |data: &[u8], extension| -> Result<String> {
+            catalog
+                .map(|path| image(path, data, extension))
+                .transpose()
+                .map(|id| id.unwrap_or_default())
+        };
         let mut image_id = String::new();
-        if let Some(catalog) = catalog
-            && (icons.has_market() || icons.has_app_grid())
-        {
+        if icons.has_market() || icons.has_app_grid() {
             let icon = if icons.has_market() {
                 icons.get_market()?
             } else {
                 icons.get_app_grid()?
             };
             image_id = match icon.which()? {
-                p::metadata::icon::Svg(svg) => image(catalog, svg?.as_bytes(), "svg")?,
-                p::metadata::icon::Png(png) => image(
-                    catalog,
+                p::metadata::icon::Svg(svg) => save_image(svg?.to_str()?.as_bytes(), "svg")?,
+                p::metadata::icon::Png(png) => save_image(
                     if png.has_dpi1x() {
                         png.get_dpi1x()?
                     } else {
@@ -479,13 +526,13 @@ impl Registry {
             };
         }
         let mut screenshots = Vec::new();
-        if let Some(catalog) = catalog {
-            for shot in meta.get_screenshots()? {
-                let image_id = match shot.which()? {
-                    p::metadata::screenshot::Png(png) => image(catalog, png?, "png")?,
-                    p::metadata::screenshot::Jpeg(jpeg) => image(catalog, jpeg?, "jpeg")?,
-                    _ => bail!("unknown screenshot format"),
-                };
+        for shot in meta.get_screenshots()? {
+            let image_id = match shot.which()? {
+                p::metadata::screenshot::Png(png) => save_image(png?, "png")?,
+                p::metadata::screenshot::Jpeg(jpeg) => save_image(jpeg?, "jpeg")?,
+                _ => bail!("unknown screenshot format"),
+            };
+            if catalog.is_some() {
                 screenshots.push(Screenshot {
                     image_id,
                     width: shot.get_width(),

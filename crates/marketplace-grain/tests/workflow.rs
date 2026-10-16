@@ -1,112 +1,16 @@
-use capnp::{message::Builder, serialize, serialize_packed, traits::HasTypeId};
-use ed25519_dalek::{Signer, SigningKey};
 use marketplace_grain::{
-    api_session_capnp::api_session,
-    grain_capnp::{session_context, ui_view},
-    ids, package_capnp as p,
+    grain_capnp::ui_view,
+    ids,
     registry::Registry,
     rpc::{View, cast},
-    spk, submit_capnp as s,
+    submit_capnp as s,
     util_capnp::byte_stream,
     web_session_capnp::web_session as web,
 };
-use sha2::{Digest, Sha512};
 use std::{cell::RefCell, io::Write, rc::Rc};
 
-fn key() -> SigningKey {
-    SigningKey::from_bytes(&[42; 32])
-}
-fn package(version: u32) -> Vec<u8> {
-    let mut manifest = Builder::new_default();
-    {
-        let mut m = manifest.init_root::<p::manifest::Builder>();
-        m.reborrow()
-            .init_app_title()
-            .set_default_text("Rust test app");
-        m.set_app_version(version);
-        m.reborrow()
-            .init_app_marketing_version()
-            .set_default_text("1.0");
-        let mut metadata = m.init_metadata();
-        metadata
-            .reborrow()
-            .init_author()
-            .set_contact_email("test@example.invalid");
-        metadata
-            .reborrow()
-            .init_short_description()
-            .set_default_text("Test package");
-        metadata
-            .reborrow()
-            .init_description()
-            .set_default_text("A signed integration-test package.");
-        metadata
-            .reborrow()
-            .init_categories(1)
-            .set(0, p::Category::DeveloperTools);
-        metadata
-            .init_license()
-            .set_open_source(p::OpenSourceLicense::Apache2);
-    }
-    let mut manifest_bytes = Vec::new();
-    serialize::write_message(&mut manifest_bytes, &manifest).unwrap();
-    let mut archive = Builder::new_default();
-    let mut file = archive
-        .init_root::<p::archive::Builder>()
-        .init_files(1)
-        .get(0);
-    file.set_name("sandstorm-manifest");
-    file.set_regular(&manifest_bytes);
-    let mut archive_bytes = Vec::new();
-    serialize::write_message(&mut archive_bytes, &archive).unwrap();
-    let hash = Sha512::digest(&archive_bytes);
-    let mut signed = key().sign(&hash).to_bytes().to_vec();
-    signed.extend_from_slice(&hash);
-    let mut signature = Builder::new_default();
-    let mut root = signature.init_root::<p::signature::Builder>();
-    root.set_public_key(key().verifying_key().as_bytes());
-    root.set_signature(&signed);
-    let mut encoder =
-        lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::default()).unwrap();
-    serialize::write_message(&mut encoder, &signature).unwrap();
-    encoder.write_all(&archive_bytes).unwrap();
-    let mut bytes = spk::MAGIC.to_vec();
-    bytes.extend_from_slice(&encoder.finish().unwrap());
-    bytes
-}
-fn request(id: &str, state: Option<s::SubmissionState>, sequence: u64) -> Vec<u8> {
-    let mut message = Builder::new_default();
-    let mut root = message.init_root::<s::submission_request::Builder>();
-    ids::set_package(
-        root.reborrow().init_package_id(),
-        &hex::decode(id).unwrap().try_into().unwrap(),
-    );
-    if let Some(state) = state {
-        let mut change = root.init_set_state();
-        change.set_new_state(state);
-        change.set_sequence_number(sequence);
-    } else {
-        root.set_check_status(());
-    }
-    let mut bytes = Vec::new();
-    serialize_packed::write_message(&mut bytes, &message).unwrap();
-    bytes.extend_from_slice(&key().sign(&bytes).to_bytes());
-    bytes
-}
-fn response_state(bytes: &[u8]) -> s::SubmissionState {
-    assert_eq!(bytes[0], 0);
-    let message = serialize_packed::read_message(&bytes[1..], spk::limits(4096)).unwrap();
-    message
-        .get_root::<s::submission_status::Reader>()
-        .unwrap()
-        .get_request_state()
-        .unwrap()
-}
-fn upload(registry: &Registry, version: u32) -> String {
-    let mut file = registry.temporary().unwrap();
-    file.write_all(&package(version)).unwrap();
-    registry.upload(file.path()).unwrap()
-}
+mod common;
+use common::*;
 
 #[test]
 fn registry_lifecycle_and_restart() -> anyhow::Result<()> {
@@ -244,36 +148,6 @@ fn rejects_corrupt_packages_and_invalid_ids() -> anyhow::Result<()> {
     );
     Ok(())
 }
-struct Context;
-impl session_context::Server for Context {}
-async fn session(view: &ui_view::Client, bits: &[bool], api: bool) -> capnp::Result<web::Client> {
-    let mut open = view.new_session_request();
-    open.get().set_session_type(if api {
-        api_session::Client::TYPE_ID
-    } else {
-        web::Client::TYPE_ID
-    });
-    let mut permissions = open
-        .get()
-        .init_user_info()
-        .init_permissions(bits.len() as u32);
-    for (i, &bit) in bits.iter().enumerate() {
-        permissions.set(i as u32, bit);
-    }
-    open.get().set_context(capnp_rpc::new_client(Context));
-    Ok(cast(open.send().promise.await?.get()?.get_session()?))
-}
-async fn post(
-    client: &web::Client,
-    path: &str,
-    body: &[u8],
-) -> capnp::Result<capnp::capability::Response<web::response::Owned>> {
-    let mut call = client.post_request();
-    call.get().set_path(path);
-    call.get().init_content().set_content(body);
-    call.send().promise.await
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn api_permissions_and_streaming_order() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
@@ -378,6 +252,13 @@ async fn api_permissions_and_streaming_order() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
+    process_entry_point(false).await
+}
+#[tokio::test(flavor = "current_thread")]
+async fn failed_startup_publication_keeps_admin_available_for_recovery() -> anyhow::Result<()> {
+    process_entry_point(true).await
+}
+async fn process_entry_point(recovery: bool) -> anyhow::Result<()> {
     use capnp_rpc::{RpcSystem, rpc_twoparty_capnp::Side, twoparty};
     use futures::AsyncReadExt;
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
@@ -409,6 +290,13 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
     tokio::task::LocalSet::new()
         .run_until(async {
             let dir = tempfile::tempdir()?;
+            let broken = if recovery {
+                let registry = Registry::new(dir.path().to_owned())?;
+                registry.publish()?;
+                Some(seed_legacy_invalid(&registry, 99)?)
+            } else {
+                None
+            };
             let (parent, child) = std::os::unix::net::UnixStream::pair()?;
             let fd = child.as_raw_fd();
             let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_marketplace-grain"));
@@ -442,6 +330,21 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
                 assert_eq!(info.get()?.get_permissions()?.len(), 3);
                 let api = session(&view, &[false, false, true], true).await?;
                 let admin = session(&view, &[true, true, false], false).await?;
+                if let Some(id) = &broken {
+                    let mut queue = admin.get_request();
+                    queue.get().set_path("queue");
+                    assert!(matches!(
+                        queue.send().promise.await?.get()?.which()?,
+                        web::response::Content(_)
+                    ));
+                    assert!(matches!(
+                        post(&admin, &format!("reject/{id}"), b"Invalid metadata")
+                            .await?
+                            .get()?
+                            .which()?,
+                        web::response::NoContent(_)
+                    ));
+                }
                 let bytes = package(1);
                 assert!(matches!(
                     post(&api, "upload", &bytes).await?.get()?.which()?,
@@ -449,7 +352,9 @@ async fn packaged_entry_point_exposes_rpc_on_fd_three() -> anyhow::Result<()> {
                 ));
                 let id = Registry::new(dir.path().to_owned())?
                     .package_ids()?
-                    .remove(0);
+                    .into_iter()
+                    .find(|id| Some(id) != broken.as_ref())
+                    .unwrap();
                 post(
                     &api,
                     "status",
@@ -755,4 +660,34 @@ async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow
             Ok::<_, anyhow::Error>(())
         })
         .await
+}
+
+#[test]
+fn invalid_metadata_is_rejected_before_commit_and_legacy_entries_remain_reviewable()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let mut file = registry.temporary()?;
+    file.write_all(&package_with_description(1, true))?;
+    assert!(
+        registry
+            .upload(file.path())
+            .unwrap_err()
+            .to_string()
+            .contains("invalid marketplace metadata")
+    );
+    assert!(registry.package_ids()?.is_empty());
+    let bad = seed_legacy_invalid(&registry, 1)?;
+    let queue = registry.queue()?;
+    assert!(
+        queue[0]["validationError"]
+            .as_str()
+            .unwrap()
+            .contains("utf-8")
+    );
+    assert!(registry.review(&bad, "approve", "").is_err());
+    registry.review(&bad, "reject", "Invalid description")?;
+    registry.publish()?;
+    assert!(dir.path().join("www/index.html").exists());
+    Ok(())
 }
