@@ -71,6 +71,17 @@ cargo xtask package --contact-email you@example.com
 make package CONTACT_EMAIL=you@example.com
 ```
 
+For a disposable build with no private signing key:
+
+```bash
+cargo xtask package --test-key
+```
+
+This uses a fixed **public** test signing key, labels the app **Sandstorm
+Marketplace (Test)**, and neither reads nor writes `.local` signing files. It
+has a separate app identity from normal builds. Anyone can sign updates for the
+test identity; do not use it for production or sensitive data.
+
 The result is `build/marketplace.spk`. The Rust packager builds the grain, stages
 its executable and shared system libraries, constructs the manifest, and signs
 and compresses the SPK. A signing identity is created in
@@ -81,7 +92,8 @@ identity causes packaging to fail instead of silently changing the app ID.
 
 The default contact address is a placeholder for local development. Set a real
 address before distributing the package. Increment `APP_VERSION` and update
-`MARKETING_VERSION` in `xtask/src/package.rs` for releases.
+`MARKETING_VERSION` in `xtask/src/package.rs` for releases, or supply explicit
+`--app-version` and `--marketing-version` values to `cargo xtask package`.
 
 ## Use in Sandstorm
 
@@ -358,6 +370,43 @@ when available. The SDK and GnuPG serve only as independent test references.
 
 The legacy `spk publish` wire protocol retains its existing unverified webkey-hash
 field. This app does not send notification emails to the old Sandstorm administrators.
+
+## Browser acceptance tests and GitHub Actions
+
+```bash
+npm ci --ignore-scripts
+npx playwright install --with-deps chromium
+npm run test:acceptance
+# Equivalent Make target: make test-acceptance
+```
+
+Playwright starts a loopback-only HTTP adapter on port 9940. The adapter uses the
+production grain WebSession RPC handlers, signed test SPKs, and a disposable
+registry; review decisions, publication, and private downloads execute real Rust
+code. Only Sandstorm platform services (public URL and the installer destination)
+are stubbed. Tests reset storage before each scenario and cover approval/rejection,
+version history, rollback, permissions, embargoed downloads, malformed-package
+recovery, automatic refresh, refresh failures, and mobile layout. Separate Rust
+tests boot the actual grain process to verify recovery after startup publication
+fails. The adapter is an ignored test binary, never shipped in the SPK.
+
+To use an existing Chromium instead of the Playwright-managed browser:
+
+```bash
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npm run test:acceptance
+```
+
+`.github/workflows/ci.yml` runs formatting, Rust tests, frontend tests, browser
+acceptance tests, and a packaged-runtime smoke test on main pushes and pull
+requests. Failed browser runs upload screenshots, traces, and an HTML report.
+
+Pushing a `v*` tag invokes `.github/workflows/spk.yml`. It first runs the same CI
+checks, then builds an optimized SPK using the public dummy key, smoke-tests it,
+and attaches `marketplace-test.spk` to a GitHub **prerelease** for the tag. No
+signing secrets or spktool installation are required. The workflow run number
+provides the test app's numeric version; the tag labels its marketing version.
+This publishes a downloadable test artifact, not a production app-market
+submission. Production signing remains a local operation with the private key.
 
 ## Logs and temporary storage
 

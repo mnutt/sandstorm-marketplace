@@ -1,0 +1,68 @@
+name: Publish test SPK
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Build and publish tagged test SPK
+    needs: checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto bubblewrap
+      - name: Build with the public test identity
+        run: |
+          cargo xtask package --test-key \
+            --app-version "$GITHUB_RUN_NUMBER" \
+            --marketing-version "$GITHUB_REF_NAME (test)" \
+            --contact-email ci@example.invalid
+          mv build/marketplace.spk build/marketplace-test.spk
+      - name: Smoke test the packaged runtime
+        run: cargo xtask test-package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marketplace-test-spk
+          path: build/marketplace-test.spk
+          if-no-files-found: error
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > build/release-notes.txt <<'NOTES'
+          Installable test build of Sandstorm Marketplace.
+
+          Signed with an intentionally public dummy key and a distinct test app identity.
+          Anyone can sign updates for this identity. Use only for disposable testing,
+          not production or sensitive data. This does not submit to an app marketplace.
+
+          Production builds must use the maintainer's private signing identity.
+          NOTES
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" build/marketplace-test.spk --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" build/marketplace-test.spk \
+              --verify-tag --prerelease --title "$GITHUB_REF_NAME — test SPK" \
+              --notes-file build/release-notes.txt
+          fi

@@ -12,8 +12,32 @@ use std::{
     process::{Command, Stdio},
 };
 
-const APP_VERSION: u32 = 2;
-const MARKETING_VERSION: &str = "0.2.0";
+pub const APP_VERSION: u32 = 2;
+pub const MARKETING_VERSION: &str = "0.2.0";
+
+pub struct Release {
+    pub test_key: bool,
+    pub app_version: u32,
+    pub marketing_version: String,
+}
+impl Default for Release {
+    fn default() -> Self {
+        Self {
+            test_key: false,
+            app_version: APP_VERSION,
+            marketing_version: MARKETING_VERSION.into(),
+        }
+    }
+}
+fn signing_key(root: &Path, test_key: bool) -> Result<SigningKey> {
+    if test_key {
+        // Intentionally public and stable. This identity is ONLY for disposable
+        // test builds: anyone can sign updates for it. Production uses .local.
+        Ok(SigningKey::from_bytes(&[0x54; 32]))
+    } else {
+        identity(root)
+    }
+}
 
 fn identity(root: &Path) -> Result<SigningKey> {
     let dir = root.join(".local");
@@ -64,16 +88,20 @@ fn identity(root: &Path) -> Result<SigningKey> {
         Ok(key)
     }
 }
-fn manifest(email: &str) -> Result<Vec<u8>> {
+fn manifest(email: &str, release: &Release) -> Result<Vec<u8>> {
     let mut message = Builder::new_default();
     let mut m = message.init_root::<p::manifest::Builder>();
     m.reborrow()
         .init_app_title()
-        .set_default_text("Sandstorm Marketplace");
-    m.set_app_version(APP_VERSION);
+        .set_default_text(if release.test_key {
+            "Sandstorm Marketplace (Test)"
+        } else {
+            "Sandstorm Marketplace"
+        });
+    m.set_app_version(release.app_version);
     m.reborrow()
         .init_app_marketing_version()
-        .set_default_text(MARKETING_VERSION);
+        .set_default_text(&release.marketing_version);
     let mut action = m.reborrow().init_actions(1).get(0);
     action
         .reborrow()
@@ -144,7 +172,7 @@ fn copy(stage: &Path, source: &Path, destination: &Path) -> Result<()> {
     fs::copy(source, destination)?;
     Ok(())
 }
-fn stage(root: &Path, email: &str, debug: bool) -> Result<tempfile::TempDir> {
+fn stage(root: &Path, email: &str, debug: bool, release: &Release) -> Result<tempfile::TempDir> {
     ensure!(
         email.contains('@') && !email.chars().any(char::is_whitespace),
         "invalid contact email"
@@ -173,7 +201,7 @@ fn stage(root: &Path, email: &str, debug: bool) -> Result<tempfile::TempDir> {
     }
     fs::set_permissions(stage.join("tmp"), fs::Permissions::from_mode(0o1777))?;
     copy(stage, &root.join("LICENSE"), Path::new("LICENSE"))?;
-    let manifest_bytes = manifest(email)?;
+    let manifest_bytes = manifest(email, release)?;
     fs::write(stage.join("sandstorm-manifest"), &manifest_bytes)?;
     // Use canonical schema text; Rust's Debug formatter differs for Void fields.
     // Dev and release share the same binary manifest.
@@ -216,16 +244,21 @@ fn install_stage(root: &Path, staged: tempfile::TempDir) -> Result<()> {
 }
 
 pub fn prepare_dev(root: &Path) -> Result<()> {
-    let staged = stage(root, "maintainer@example.invalid", true)?;
+    let staged = stage(
+        root,
+        "maintainer@example.invalid",
+        true,
+        &Release::default(),
+    )?;
     install_stage(root, staged)?;
     println!("Ready. Run: spk dev -I crates/marketplace-grain/schema");
     Ok(())
 }
 
-pub fn package(root: &Path, email: &str, debug: bool) -> Result<()> {
-    let staged = stage(root, email, debug)?;
+pub fn package(root: &Path, email: &str, debug: bool, release: &Release) -> Result<()> {
+    let staged = stage(root, email, debug, release)?;
     let stage = staged.path();
-    let signing = identity(root)?;
+    let signing = signing_key(root, release.test_key)?;
     let mut archive = Builder::new_default();
     let count = fs::read_dir(stage)?.count();
     files(
@@ -259,4 +292,58 @@ pub fn package(root: &Path, email: &str, debug: bool) -> Result<()> {
         ids::app_id(signing.verifying_key().as_bytes())
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ci_test_identity_is_stable_and_does_not_touch_production_keys() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir(root.path().join(".local"))?;
+        fs::write(
+            root.path().join(".local/marketplace.keyring"),
+            b"do not read or replace",
+        )?;
+        let first = signing_key(root.path(), true)?;
+        let second = signing_key(root.path(), true)?;
+        ensure!(
+            first.verifying_key() == second.verifying_key(),
+            "test identity changed"
+        );
+        ensure!(
+            fs::read(root.path().join(".local/marketplace.keyring"))? == b"do not read or replace",
+            "production key changed"
+        );
+        ensure!(
+            !root.path().join(".local/app-id").exists(),
+            "test build wrote a production identity"
+        );
+        let release = Release {
+            test_key: true,
+            app_version: 123,
+            marketing_version: "v1.2.3 (test)".into(),
+        };
+        let bytes = manifest("ci@example.invalid", &release)?;
+        let message = serialize::read_message(&mut bytes.as_slice(), spk::limits(4096))?;
+        let manifest = message.get_root::<p::manifest::Reader>()?;
+        ensure!(
+            manifest.get_app_version() == 123,
+            "version override ignored"
+        );
+        ensure!(
+            manifest.get_app_title()?.get_default_text()?.to_str()?
+                == "Sandstorm Marketplace (Test)",
+            "test build is unlabeled"
+        );
+        ensure!(
+            manifest
+                .get_app_marketing_version()?
+                .get_default_text()?
+                .to_str()?
+                == "v1.2.3 (test)",
+            "marketing version override ignored"
+        );
+        Ok(())
+    }
 }

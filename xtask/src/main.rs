@@ -23,6 +23,13 @@ enum Task {
         contact_email: String,
         #[arg(long)]
         debug: bool,
+        /// Sign with a fixed PUBLIC test key; never reads or writes .local identity.
+        #[arg(long)]
+        test_key: bool,
+        #[arg(long, default_value_t = package::APP_VERSION)]
+        app_version: u32,
+        #[arg(long, default_value = package::MARKETING_VERSION)]
+        marketing_version: String,
     },
     /// Boot the packaged runtime in Bubblewrap with disposable storage.
     TestPackage,
@@ -66,7 +73,19 @@ fn main() -> Result<()> {
         Task::Package {
             contact_email,
             debug,
-        } => package::package(root, &contact_email, debug),
+            test_key,
+            app_version,
+            marketing_version,
+        } => package::package(
+            root,
+            &contact_email,
+            debug,
+            &package::Release {
+                test_key,
+                app_version,
+                marketing_version,
+            },
+        ),
         Task::TestPackage => validation::package(root),
         Task::TestInterop { spk } => validation::interop(root, &spk),
     }
