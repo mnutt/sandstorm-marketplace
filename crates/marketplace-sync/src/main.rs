@@ -5,24 +5,16 @@ use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
 use marketplace_model::app_index::{AppDetailsForMarket, AppIndexForMarket, LoadedAppIndex};
 use reqwest::Client;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::fs;
 
 #[derive(Debug, Parser)]
 struct Cli {
-    #[arg(long, default_value = "sqlite://marketplace.db")]
-    database_url: String,
-
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    SyncFixtures {
-        #[arg(long, default_value = "fixtures/app-index")]
-        fixture_root: PathBuf,
-    },
     SyncRemote {
         #[arg(long, default_value = "https://app-index.sandstorm.io")]
         base_url: String,
@@ -51,9 +43,6 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::SyncFixtures { fixture_root } => {
-            sync_fixtures(&cli.database_url, &fixture_root).await?
-        }
         Command::SyncRemote {
             base_url,
             output_dir,
@@ -67,62 +56,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-async fn sync_fixtures(database_url: &str, fixture_root: &PathBuf) -> Result<()> {
-    let loaded = LoadedAppIndex::load(fixture_root)?;
-    let options = database_url
-        .parse::<SqliteConnectOptions>()?
-        .create_if_missing(true);
-    let pool = SqlitePoolOptions::new().connect_with(options).await?;
-
-    sqlx::query(
-        r#"
-        create table if not exists apps (
-            app_id text primary key,
-            name text not null,
-            version text not null,
-            package_id text not null,
-            short_description text not null,
-            created_at text not null,
-            is_open_source integer not null
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await?;
-
-    for app in &loaded.index.apps {
-        sqlx::query(
-            r#"
-            insert into apps (app_id, name, version, package_id, short_description, created_at, is_open_source)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            on conflict(app_id) do update set
-              name = excluded.name,
-              version = excluded.version,
-              package_id = excluded.package_id,
-              short_description = excluded.short_description,
-              created_at = excluded.created_at,
-              is_open_source = excluded.is_open_source
-            "#,
-        )
-        .bind(&app.app_id)
-        .bind(&app.name)
-        .bind(&app.version)
-        .bind(&app.package_id)
-        .bind(&app.short_description)
-        .bind(&app.created_at)
-        .bind(app.is_open_source as i64)
-        .execute(&pool)
-        .await?;
-    }
-
-    println!(
-        "synced {} apps into {}",
-        loaded.index.apps.len(),
-        database_url
-    );
     Ok(())
 }
 
