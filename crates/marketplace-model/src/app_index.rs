@@ -93,10 +93,6 @@ impl LoadedAppIndex {
         Ok(Self { root, index })
     }
 
-    pub fn app(&self, app_id: &str) -> Option<&AppSummary> {
-        self.index.apps.iter().find(|app| app.app_id == app_id)
-    }
-
     pub fn load_details(&self, app_id: &str) -> Result<AppDetailsForMarket> {
         let path = self.root.join("apps").join(format!("{app_id}.json"));
         let text = fs::read_to_string(&path)
@@ -106,10 +102,6 @@ impl LoadedAppIndex {
 
     pub fn image_url(&self, image_id: &str) -> String {
         format!("/images/{image_id}")
-    }
-
-    pub fn package_url(&self, package_id: &str) -> String {
-        format!("/static/packages/{package_id}")
     }
 }
 
