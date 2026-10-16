@@ -151,3 +151,12 @@ main { max-width: 100rem; margin: auto; padding: 3rem 2rem 4rem clamp(1rem, 5vw,
 .install-dialog label { display: block; margin-top: 1rem; }
 .install-dialog input { width: 100%; padding: .6rem; margin: .35rem 0 1rem; border: 1px solid var(--line); }
 .install-dialog [role="alert"] { color: #942c3b; }
+
+.deprecation-notice {
+  padding: 1rem 1.25rem;
+  border: 1px solid #d8b76a;
+  border-radius: 6px;
+  background: #fff6df;
+  color: #594315;
+}
+.deprecation-notice a { color: inherit; text-decoration: underline; font-weight: 600; }

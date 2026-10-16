@@ -452,3 +452,17 @@ Grain uploads and SPK decompression use `/var/tmp`. Sandstorm's separate `/tmp`
 is limited to 16 MiB and is unsuitable for package verification. Imports also
 need temporary disk space for the uploaded tarball, extracted SPKs, and staging;
 free space on the host's `/tmp` does not describe grain storage availability.
+
+### App deprecation
+
+Open an app in the admin UI to deprecate it, optionally selecting a replacement
+app with an approved public release. Deprecated apps disappear from the home,
+category, search, and experimental discovery indexes (including their JSON
+indexes). Direct app pages remain available with a deprecation banner and a link
+to the replacement, if selected. Public SPKs remain available. Deprecation does not approve private submissions or change release
+approval, author withdrawal, or rollback behavior.
+
+Use **Restore app to indexes** to undo deprecation. This policy is app-level and
+survives new releases and restarts. `/var/deprecations.json` is authoritative and
+included in Sandstorm grain backups. A public catalog sync/import only includes
+listed apps; it is not a full grain backup and does not preserve deprecated apps.

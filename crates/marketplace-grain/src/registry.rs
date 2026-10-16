@@ -6,7 +6,7 @@ use capnp::{
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use marketplace_model::app_index::{
-    AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity,
+    AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity, Deprecation,
 };
 use serde::Serialize;
 use std::{
@@ -432,6 +432,49 @@ impl Registry {
         Ok(releases)
     }
 
+    fn deprecations(&self) -> Result<BTreeMap<String, Deprecation>> {
+        match fs::read(self.root.join("deprecations.json")) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// App-level policy, independent of package approval and rollback selection.
+    pub fn set_deprecation(&self, app_id: &str, value: Option<Deprecation>) -> Result<()> {
+        ids::parse_app_id(app_id)?;
+        let releases = self.releases()?;
+        ensure!(releases.iter().any(|r| r.app_id == app_id), "unknown app");
+        let mut deprecations = self.deprecations()?;
+        if let Some(value) = value {
+            if let Some(replacement) = &value.replacement_app_id {
+                ids::parse_app_id(replacement)?;
+                ensure!(replacement != app_id, "an app cannot replace itself");
+                ensure!(
+                    selected_releases(&releases)?.contains_key(replacement.as_str()),
+                    "replacement must have an approved public release"
+                );
+                // Follow the existing chain to prevent circular replacement links.
+                let mut next = Some(replacement.as_str());
+                let mut seen = std::collections::BTreeSet::from([app_id]);
+                while let Some(id) = next {
+                    ensure!(seen.insert(id), "replacement would create a cycle");
+                    next = deprecations
+                        .get(id)
+                        .and_then(|d| d.replacement_app_id.as_deref());
+                }
+            }
+            deprecations.insert(app_id.to_owned(), value);
+        } else {
+            deprecations.remove(app_id);
+        }
+        atomic_write(
+            &self.root.join("deprecations.json"),
+            &serde_json::to_vec(&deprecations)?,
+        )?;
+        self.publish()
+    }
+
     fn description_overrides(&self) -> Result<BTreeMap<String, String>> {
         let path = self.root.join("descriptions");
         if !path.exists() {
@@ -471,6 +514,7 @@ impl Registry {
             }
         }
         let overrides = self.description_overrides()?;
+        let deprecations = self.deprecations()?;
         tracing::info!(packages = releases.len(), "Rebuilding public catalog");
         let catalog = self.root.join("catalog");
         if catalog.exists() {
@@ -506,7 +550,8 @@ impl Registry {
             let entry =
                 self.catalog_entry(release.metadata.get_root()?, status.get_publish_date())?;
             entry.write_assets(&catalog)?;
-            let (app, details) = (entry.app, entry.details);
+            let (mut app, details) = (entry.app, entry.details);
+            app.deprecation = deprecations.get(&app.app_id).cloned();
             fs::hard_link(
                 self.package_dir(&id)?.join("spk"),
                 catalog.join("packages").join(&id),
@@ -559,6 +604,7 @@ impl Registry {
             .get_root::<s::submission_status::Reader>()?
             .get_publish_date();
         let mut entry = self.catalog_entry(metadata.get_root()?, published)?;
+        entry.app.deprecation = self.deprecations()?.remove(&entry.app.app_id);
         if let Some(description) = self.description_overrides()?.get(&entry.app.app_id) {
             entry.app.short_description = description.clone();
         }
@@ -575,6 +621,7 @@ impl Registry {
 
     pub fn queue(&self) -> Result<Vec<ReviewRelease>> {
         let mut queue = Vec::new();
+        let deprecations = self.deprecations()?;
         let releases = self.releases()?;
         let selected = selected_releases(&releases)?;
         for release in &releases {
@@ -588,9 +635,10 @@ impl Registry {
             let validation_error = entry.as_ref().err().map(|err| format!("{err:#}"));
             // Older builds may have stored malformed metadata. Keep these releases
             // visible so an approver can reject them and restore publication.
-            let (app, details) = entry.unwrap_or_else(|_| {
+            let (mut app, details) = entry.unwrap_or_else(|_| {
                 (
                     AppSummary {
+                        deprecation: None,
                         app_id,
                         package_id: id.clone(),
                         name: format!("Invalid package {}", &id[..8]),
@@ -613,6 +661,7 @@ impl Registry {
                     },
                 )
             });
+            app.deprecation = deprecations.get(&app.app_id).cloned();
             let (review, reason) = match status.reborrow().which()? {
                 s::submission_status::Approved(_) => ("approved", ""),
                 s::submission_status::NeedsUpdate(reason) => ("needsUpdate", reason?.to_str()?),

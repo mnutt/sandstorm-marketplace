@@ -844,3 +844,104 @@ fn publication_and_import_when_sandbox_blocks_directory_exchange() -> anyhow::Re
     rollback_preserves_history_and_respects_author_and_review_state()?;
     Ok(())
 }
+
+#[test]
+fn deprecation_hides_discovery_preserves_downloads_and_survives_new_releases() -> anyhow::Result<()>
+{
+    use marketplace_model::app_index::Deprecation;
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let first = upload(&registry, 1);
+    registry.set_state(&first, s::SubmissionState::Publish, 1)?;
+    registry.review(&first, "approve", "")?;
+    let pending = upload(&registry, 3);
+    registry.set_state(&pending, s::SubmissionState::Publish, 1)?;
+    let private = upload(&registry, 4);
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let other_key = ed25519_dalek::SigningKey::from_bytes(&[43; 32]);
+    let replacement = ids::app_id(other_key.verifying_key().as_bytes());
+    let mut file = registry.temporary()?;
+    file.write_all(&package_with_key(1, false, &other_key, "Replacement"))?;
+    let other = registry.upload(file.path())?;
+    let value = || {
+        Some(Deprecation {
+            replacement_app_id: Some(replacement.clone()),
+        })
+    };
+    assert!(registry.set_deprecation(&app, value()).is_err());
+    registry.set_state(&other, s::SubmissionState::Publish, 1)?;
+    registry.review(&other, "approve", "")?;
+    assert!(
+        registry
+            .set_deprecation(
+                &app,
+                Some(Deprecation {
+                    replacement_app_id: Some(app.clone())
+                })
+            )
+            .is_err()
+    );
+    registry.set_deprecation(&app, value())?;
+    assert!(std::fs::read_to_string(dir.path().join("catalog/apps/index.json"))?.contains(&app));
+    marketplace_web::publish::publish(&dir.path().join("catalog"), &dir.path().join("standalone"))?;
+    assert!(
+        dir.path()
+            .join("standalone/app")
+            .join(&app)
+            .join("index.html")
+            .exists()
+    );
+    assert!(
+        registry
+            .set_deprecation(
+                &replacement,
+                Some(Deprecation {
+                    replacement_app_id: Some(app.clone())
+                })
+            )
+            .is_err()
+    );
+    let check = || -> anyhow::Result<()> {
+        for index in ["apps/index.json", "experimental/index.json"] {
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("www").join(index))?)?;
+            assert!(
+                json["apps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item["appId"] != app)
+            );
+        }
+        let home = std::fs::read_to_string(dir.path().join("www/index.html"))?;
+        assert!(!home.contains(&format!("/app/{app}")));
+        let page =
+            std::fs::read_to_string(dir.path().join("www/app").join(&app).join("index.html"))?;
+        assert!(page.contains("This app is deprecated."));
+        assert!(page.contains(&format!("href=\"/app/{replacement}\"")));
+        for package in [&first, &pending] {
+            assert!(dir.path().join("www/packages").join(package).is_file());
+        }
+        assert!(!dir.path().join("www/packages").join(&private).exists());
+        Ok(())
+    };
+    check()?;
+    registry.review(&pending, "approve", "")?;
+    let reopened = Registry::new(dir.path().to_owned())?;
+    reopened.publish()?;
+    check()?;
+    assert!(
+        reopened
+            .queue()?
+            .iter()
+            .filter(|r| r.app.app_id == app)
+            .all(|r| r.app.deprecation.is_some())
+    );
+    reopened.set_deprecation(&app, None)?;
+    assert!(std::fs::read_to_string(dir.path().join("www/apps/index.json"))?.contains(&app));
+    assert!(
+        !std::fs::read_to_string(dir.path().join("www/app").join(&app).join("index.html"))?
+            .contains("This app is deprecated.")
+    );
+    Ok(())
+}

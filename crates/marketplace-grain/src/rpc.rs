@@ -234,6 +234,10 @@ impl web::Server for Session {
                         )
                         .await?;
                         results.get().init_no_content();
+                    } else if let Some(app_id) = path.strip_prefix("deprecation/") {
+                        let value = serde_json::from_slice(body)?;
+                        registry.set_deprecation(app_id, value)?;
+                        results.get().init_no_content();
                     } else if path == "reindex" {
                         registry.publish()?;
                         results.get().init_no_content();

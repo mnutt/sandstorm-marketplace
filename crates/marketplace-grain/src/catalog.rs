@@ -109,6 +109,7 @@ pub(crate) fn parse<'a>(info: p::verified_info::Reader<'a>, published: i64) -> R
     };
     Ok(Entry {
         app: AppSummary {
+            deprecation: None,
             app_id: ids::app_id(&ids::app_bytes(info.get_app_id()?)),
             package_id: hex::encode(ids::package_bytes(info.get_package_id()?)),
             name: info.get_title()?.get_default_text()?.to_str()?.to_string(),

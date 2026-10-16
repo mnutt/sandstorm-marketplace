@@ -208,3 +208,25 @@ test('experimental mode filters to pending updates and preserves mode through na
   await expect(page.locator('[data-install]')).toHaveCount(0);
   expect((await request.get(`/packages/${pending.app.packageId}`)).status()).toBe(404);
 });
+
+test('deprecation hides discovery but preserves listings and downloads and can be undone', async ({ page, request }) => {
+  const rows = await queue(request);
+  const current = rows.find(row => row.current);
+  const appId = current.app.appId;
+  for (const role of ['reviewer', 'submitter']) {
+    expect((await request.post(`/${role}/deprecation/${appId}`, { data: '{}' })).ok()).toBeFalsy();
+  }
+  await page.goto(`/admin/#app/${appId}`);
+  await page.getByRole('button', { name: 'Deprecate app', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Restore app to indexes' })).toBeVisible();
+  expect(await publicVersion(request)).toBeUndefined();
+  expect((await request.get(`/public/packages/${current.app.packageId}`)).ok()).toBeTruthy();
+  expect((await (await request.get('/public/experimental/index.json')).json()).apps).toHaveLength(0);
+  await page.goto(`/public/app/${appId}/`);
+  await expect(page.locator('.deprecation-notice')).toContainText('This app is deprecated.');
+  await expect(page.getByRole('link', { name: 'Download SPK', exact: true })).toBeVisible();
+  await page.goto(`/admin/#app/${appId}`);
+  await page.getByRole('button', { name: 'Restore app to indexes' }).click();
+  await expect(page.getByRole('button', { name: 'Deprecate app', exact: true })).toBeVisible();
+  expect(await publicVersion(request)).toBe(current.app.versionNumber);
+});

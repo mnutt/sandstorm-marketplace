@@ -14,6 +14,8 @@ pub struct AppIndexForMarket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation: Option<Deprecation>,
     pub app_id: String,
     pub name: String,
     pub version: String,
@@ -35,6 +37,13 @@ pub struct AppSummary {
     #[serde(default)]
     pub created_at: String,
     pub version_number: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Deprecation {
+    #[serde(default)]
+    pub replacement_app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

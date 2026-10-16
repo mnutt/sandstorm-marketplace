@@ -27,6 +27,11 @@
       {% endif %}
     </header>
     <main class="app-page">
+      {% if let Some(deprecation) = app.deprecation %}
+      <p class="deprecation-notice" role="status"><strong>This app is deprecated.</strong> It is no longer listed in the marketplace. Existing releases remain available to download.
+        {% if let Some(id) = deprecation.replacement_app_id %}<a href="{% if preview %}../#app/{{ id }}{% else %}/app/{{ id }}{% endif %}">View replacement app</a>.{% endif %}
+      </p>
+      {% endif %}
       {% if experimental %}<p class="preview-notice" role="status">Experimental release · Pending approval</p>{% endif %}
       <a class="back" href="{{ home_href }}">{% if preview %}Back to app history{% else %}Back to all apps{% endif %}</a>
       {% if preview %}<p class="preview-notice" role="status">Private listing preview · Build {{ app.version_number }} · Previewing does not approve or publish this release.</p>{% endif %}

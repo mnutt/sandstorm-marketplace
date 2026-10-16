@@ -149,6 +149,27 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
         fs::create_dir_all(&directory)?;
         write(&directory.join("index.html"), page)?;
     }
+    // Index files were hard-linked from the source. Unlink before rewriting so
+    // filtering discovery cannot mutate the catalog used to build direct pages.
+    for directory in ["apps", "experimental"] {
+        let path = stage.join(directory).join("index.json");
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    // Render direct pages first, then remove deprecated apps from discovery.
+    let mut index = index;
+    index.index.apps.retain(|app| app.deprecation.is_none());
+    updates.index.apps.retain(|app| app.deprecation.is_none());
+    write(
+        &stage.join("apps/index.json"),
+        serde_json::to_vec(&index.index)?,
+    )?;
+    fs::create_dir_all(stage.join("experimental"))?;
+    write(
+        &stage.join("experimental/index.json"),
+        serde_json::to_vec(&updates.index)?,
+    )?;
     write(
         &stage.join("marketplace.js"),
         include_str!("../static/marketplace.js"),

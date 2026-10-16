@@ -268,7 +268,12 @@ fn build_tag_chips(
     search: &str,
 ) -> Vec<TagChip> {
     let mut counts = BTreeMap::<String, usize>::new();
-    for app in &index.index.apps {
+    for app in index
+        .index
+        .apps
+        .iter()
+        .filter(|app| app.deprecation.is_none())
+    {
         for category in &app.categories {
             *counts.entry(category.clone()).or_default() += 1;
         }
@@ -277,7 +282,12 @@ fn build_tag_chips(
     let mut tags = Vec::with_capacity(counts.len() + 1);
     tags.push(TagChip {
         name: "All".to_string(),
-        count: index.index.apps.len(),
+        count: index
+            .index
+            .apps
+            .iter()
+            .filter(|app| app.deprecation.is_none())
+            .count(),
         href: home_href(None, search),
         selected: current_tag.is_none(),
     });

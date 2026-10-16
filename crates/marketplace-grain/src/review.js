@@ -331,6 +331,51 @@ if (typeof document !== "undefined") {
         "description",
       ),
     );
+    const deprecation = element("section", undefined, "card deprecation-controls");
+    deprecation.append(element("h2", "Deprecation"), element("p",
+      item.app.deprecation
+        ? "Deprecated. Hidden from marketplace indexes; direct listings and downloads remain available."
+        : "Active. This app appears in marketplace indexes when it has a public release."));
+    if (item.app.deprecation?.replacementAppId) {
+      const replacement = element("a", "View replacement app");
+      replacement.href = `#app/${encodeURIComponent(item.app.deprecation.replacementAppId)}`;
+      deprecation.append(replacement);
+    }
+    if (canApprove) {
+      const form = element("form");
+      const label = element("label", "Replacement app (optional)");
+      const select = element("select");
+      select.id = "replacement-app";
+      select.dataset.write = "";
+      label.htmlFor = select.id;
+      const none = element("option", "No replacement");
+      none.value = "";
+      select.append(none);
+      const candidates = groups.map(group => group.find(version => version.current)).filter(Boolean);
+      for (const candidate of candidates.sort((a, b) => a.app.name.localeCompare(b.app.name))) {
+        if (candidate.app.appId === appId) continue;
+        const option = element("option", candidate.app.name);
+        option.value = candidate.app.appId;
+        select.append(option);
+      }
+      select.value = item.app.deprecation?.replacementAppId || "";
+      const save = writeButton(item.app.deprecation ? "Update deprecation" : "Deprecate app", () => {});
+      save.type = "submit";
+      form.append(label, select, save);
+      const update = value => runAction(async () => {
+        try {
+          await request(`deprecation/${encodeURIComponent(appId)}`, JSON.stringify(value));
+          notice("message", value ? "App deprecated. Direct listings and downloads remain available." : "App restored to marketplace indexes.");
+        } finally { await refresh(); }
+      });
+      form.onsubmit = event => {
+        event.preventDefault();
+        update({ replacementAppId: select.value || null });
+      };
+      if (item.app.deprecation) form.append(writeButton("Restore app to indexes", () => update(null)));
+      deprecation.append(form);
+    }
+    info.append(deprecation);
     if (item.pinnedPackageId) {
       info.append(
         element(
@@ -368,6 +413,7 @@ if (typeof document !== "undefined") {
     const name = appLink(item);
     name.className = "app-name";
     app.append(name, element("div", item.app.shortDescription || "", "meta"));
+    if (item.app.deprecation) app.append(element("span", "Deprecated", "badge"));
     const awaiting = versions.filter(awaitingReview).length;
     if (awaiting)
       app.append(
