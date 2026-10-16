@@ -626,7 +626,7 @@ fn image(catalog: &Path, data: &[u8], extension: &str) -> Result<String> {
 }
 pub fn read_message(path: &Path) -> Result<Message> {
     Ok(serialize::read_message(
-        File::open(path)?,
+        File::open(path).with_context(|| format!("opening registry file {}", path.display()))?,
         spk::limits(16 * 1024 * 1024),
     )?)
 }

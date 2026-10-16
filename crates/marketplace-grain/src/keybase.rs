@@ -73,7 +73,9 @@ pub async fn lookup(
     let mut restore = platform.restore_request();
     restore
         .get()
-        .set_token(&std::fs::read(registry.root.join("keybase-token"))?);
+        .set_token(&std::fs::read(registry.root.join("keybase-token")).context(
+            "Keybase is not connected; use Connect Keybase before looking up an author",
+        )?);
     let restored = restore.send().promise.await?;
     let endpoint: web::Client = restored.get()?.get_cap().get_as()?;
     let bytes = Rc::new(RefCell::new(Vec::new()));

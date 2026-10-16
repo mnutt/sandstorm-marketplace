@@ -91,6 +91,13 @@ impl web::Server for Session {
         let api = self.api;
         let can_approve = self.can_approve;
         Promise::from_future(async move {
+            let request_path = params
+                .get()
+                .and_then(|p| p.get_path())
+                .ok()
+                .and_then(|p| p.to_str().ok())
+                .unwrap_or("<invalid>")
+                .to_owned();
             let action: Result<()> = async {
                 ensure!(!api, "submission API does not expose administration");
                 let path = params.get()?.get_path()?.to_str()?;
@@ -135,7 +142,10 @@ impl web::Server for Session {
                 Ok(())
             }.await;
             if let Err(err) = action {
-                failure(results.get(), &err);
+                failure(
+                    results.get(),
+                    &err.context(format!("request {request_path}")),
+                );
             }
             Ok(())
         })
@@ -151,6 +161,13 @@ impl web::Server for Session {
         let context = self.context.clone();
         let platform = self.platform.clone();
         Promise::from_future(async move {
+            let request_path = params
+                .get()
+                .and_then(|p| p.get_path())
+                .ok()
+                .and_then(|p| p.to_str().ok())
+                .unwrap_or("<invalid>")
+                .to_owned();
             let action: Result<()> = async {
                 let params = params.get()?;
                 let path = params.get_path()?.to_str()?;
@@ -240,7 +257,10 @@ impl web::Server for Session {
             }
             .await;
             if let Err(err) = action {
-                failure(results.get(), &err);
+                failure(
+                    results.get(),
+                    &err.context(format!("request {request_path}")),
+                );
             }
             Ok(())
         })
@@ -432,7 +452,7 @@ fn failure(mut response: web::response::Builder<'_>, err: &anyhow::Error) {
     let mut output = response.reborrow().init_client_error();
     output.set_status_code(web::response::ClientErrorCode::BadRequest);
     output.set_description_html(
-        err.to_string()
+        format!("{err:#}")
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
