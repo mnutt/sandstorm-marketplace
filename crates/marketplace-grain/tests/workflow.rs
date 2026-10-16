@@ -651,3 +651,108 @@ fn real_catalog_tarball_import() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow::Result<()> {
+    struct Sink {
+        bytes: Rc<RefCell<Vec<u8>>>,
+        done: Rc<std::cell::Cell<bool>>,
+        expected: Rc<std::cell::Cell<u64>>,
+    }
+    impl byte_stream::Server for Sink {
+        fn expect_size(
+            &mut self,
+            params: byte_stream::ExpectSizeParams,
+            _: byte_stream::ExpectSizeResults,
+        ) -> capnp::capability::Promise<(), capnp::Error> {
+            self.expected.set(params.get().unwrap().get_size());
+            capnp::capability::Promise::ok(())
+        }
+        fn write(
+            &mut self,
+            params: byte_stream::WriteParams,
+        ) -> capnp::capability::Promise<(), capnp::Error> {
+            self.bytes
+                .borrow_mut()
+                .extend_from_slice(params.get().unwrap().get_data().unwrap());
+            capnp::capability::Promise::ok(())
+        }
+        fn done(
+            &mut self,
+            _: byte_stream::DoneParams,
+            _: byte_stream::DoneResults,
+        ) -> capnp::capability::Promise<(), capnp::Error> {
+            self.done.set(true);
+            capnp::capability::Promise::ok(())
+        }
+    }
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let dir = tempfile::tempdir()?;
+            let registry = Registry::new(dir.path().to_owned())?;
+            let id = upload(&registry, 1);
+            registry.submission(&request(&id, Some(s::SubmissionState::Review), 1))?;
+            assert!(!dir.path().join("www/packages").join(&id).exists());
+            assert_eq!(registry.queue()?[0]["publicDownload"], false);
+            let view = capnp_rpc::new_client(View {
+                registry: registry.clone(),
+                platform: Rc::new(RefCell::new(None)),
+            });
+            let reviewer = session(&view, &[false, true, false], false).await?;
+            let submitter = session(&view, &[false, false, true], true).await?;
+            for (client, path) in [
+                (&submitter, format!("download/{id}")),
+                (&reviewer, "download/../../keybase-token".to_owned()),
+                (&reviewer, format!("download/{}", "0".repeat(32))),
+            ] {
+                let mut get = client.get_request();
+                get.get().set_path(&path);
+                assert!(matches!(
+                    get.send().promise.await?.get()?.which()?,
+                    web::response::ClientError(_)
+                ));
+            }
+            let bytes = Rc::new(RefCell::new(Vec::new()));
+            let done = Rc::new(std::cell::Cell::new(false));
+            let expected = Rc::new(std::cell::Cell::new(0));
+            let mut get = reviewer.get_request();
+            get.get().set_path(&format!("download/{id}"));
+            get.get()
+                .init_context()
+                .set_response_stream(capnp_rpc::new_client(Sink {
+                    bytes: bytes.clone(),
+                    done: done.clone(),
+                    expected: expected.clone(),
+                }));
+            let response = get.send().promise.await?;
+            let content = match response.get()?.which()? {
+                web::response::Content(content) => content,
+                _ => panic!("expected download"),
+            };
+            assert_eq!(
+                content.get_mime_type()?.to_str()?,
+                "application/octet-stream"
+            );
+            match content.get_disposition().which()? {
+                web::response::content::disposition::Download(name) => {
+                    assert_eq!(name?.to_str()?, format!("{id}.spk"))
+                }
+                _ => panic!("expected attachment"),
+            }
+            let _handle = match content.get_body().which()? {
+                web::response::content::body::Stream(handle) => handle?,
+                _ => panic!("expected stream"),
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !done.get() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            assert_eq!(*bytes.borrow(), package(1));
+            assert_eq!(expected.get(), bytes.borrow().len() as u64);
+            assert!(!dir.path().join("www/packages").join(&id).exists());
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+}

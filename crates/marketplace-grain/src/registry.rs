@@ -441,7 +441,7 @@ impl Registry {
             let current = selected.get(&app.app_id) == Some(&id);
             let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
             queue.push(json!({"current": current, "pinnedPackageId": pin,
-                "receivedAt": received_at, "publishedAt": status.get_publish_date(), "app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
+                "publicDownload": self.root.join("www/packages").join(&id).is_file(), "receivedAt": received_at, "publishedAt": status.get_publish_date(), "app": app, "details": details, "requestState": format!("{:?}", status.reborrow().get_request_state()?).to_lowercase(),
                 "review": review, "reason": reason, "contactEmail": info.get_metadata()?.get_author().get_contact_email()?.to_str()?,
                 "fingerprint": info.get_author_pgp_key_fingerprint()?.to_str()?}));
         }

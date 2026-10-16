@@ -6,7 +6,7 @@ use crate::{
     util_capnp::byte_stream,
     web_session_capnp::web_session as web,
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use capnp::{
     capability::{FromClientHook, Promise},
     traits::HasTypeId,
@@ -105,6 +105,23 @@ impl web::Server for Session {
                         }
                     }
                     "review.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("review.js")),
+                    path if path.starts_with("download/") => {
+                        let id = &path[9..];
+                        let file_path = registry.package_dir(id)?.join("spk");
+                        let file = tokio::fs::File::open(&file_path).await
+                            .with_context(|| format!("opening submitted package {}", file_path.display()))?;
+                        let size = file.metadata().await?.len();
+                        let stream = params.get()?.get_context()?.get_response_stream()?;
+                        let task = tokio::task::spawn_local(async move {
+                            if let Err(err) = stream_package(file, size, stream).await {
+                                tracing::warn!(error = ?err, "Package download failed");
+                            }
+                        });
+                        let mut response = results.get().init_content();
+                        response.set_mime_type("application/octet-stream");
+                        response.reborrow().init_disposition().set_download(&format!("{id}.spk"));
+                        response.init_body().set_stream(capnp_rpc::new_client(Download(task)));
+                    }
                     "queue" => content(results.get(), "application/json", &serde_json::to_vec(&registry.queue()?)?),
                     "import-status" => content(results.get(), "application/json", &serde_json::to_vec(&serde_json::json!({"available": can_approve && !registry.is_busy() && registry.package_ids()?.is_empty()}))?),
                     "public-id" => {
@@ -426,4 +443,35 @@ fn not_found(mut response: web::response::Builder<'_>) {
     let mut output = response.reborrow().init_client_error();
     output.set_status_code(web::response::ClientErrorCode::NotFound);
     output.set_description_html("Not found");
+}
+
+// Dropping the response handle cancels the transfer and closes the file.
+struct Download(tokio::task::JoinHandle<()>);
+impl crate::util_capnp::handle::Server for Download {}
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+async fn stream_package(
+    mut file: tokio::fs::File,
+    size: u64,
+    stream: byte_stream::Client,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut expected = stream.expect_size_request();
+    expected.get().set_size(size);
+    expected.send().promise.await?;
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let mut write = stream.write_request();
+        write.get().set_data(&buffer[..count]);
+        write.send().await?;
+    }
+    stream.done_request().send().promise.await?;
+    Ok(())
 }

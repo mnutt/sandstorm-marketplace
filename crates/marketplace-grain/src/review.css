@@ -97,3 +97,6 @@ dialog .actions { justify-content: flex-end; }
 #app-detail { max-width: 70rem; }
 .app-info { margin-bottom: 2rem; }
 .app-history .release { background: white; padding: 1.25rem; margin-bottom: 1rem; border: 0; box-shadow: 1px 2px 0 #a694b2; }
+
+#install-server { display: block; width: 100%; margin: .5rem 0 1rem; }
+.actions .button { padding: .45rem .85rem; font-size: inherit; }

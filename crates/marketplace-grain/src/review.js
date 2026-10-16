@@ -20,16 +20,26 @@ function reviewItems(items, filter, query) {
   return items.filter(item => matches(item, query) && (filter === 'all' || (filter === 'pending' ? awaitingReview(item) : item.review === filter)))
     .sort((a, b) => (b.receivedAt || '').localeCompare(a.receivedAt || '') || b.app.versionNumber - a.app.versionNumber || a.app.name.localeCompare(b.app.name));
 }
+function testInstallUrl(server, publicBase, packageId) {
+  const host = new URL(server);
+  const base = new URL(publicBase);
+  if (![host, base].every(url => ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password)) {
+    throw new Error('Enter an http:// or https:// Sandstorm server URL without credentials.');
+  }
+  const packageUrl = new URL(`packages/${encodeURIComponent(packageId)}`, `${base.href.replace(/\/$/, '')}/`);
+  return `${host.origin}/install/${encodeURIComponent(packageId)}?url=${encodeURIComponent(packageUrl.href)}`;
+}
 function releaseCount(count) { return `${count} release${count === 1 ? '' : 's'}`; }
 function canRollback(item, versions) {
   const current = versions.find(version => version.current);
   return item.review === 'approved' && item.requestState === 'publish' && !!current && item.app.versionNumber < current.app.versionNumber;
 }
-if (typeof module !== 'undefined') module.exports = { awaitingReview, groupApps, matches, reviewItems, canRollback, lastPublished, publishedApps, releaseCount };
+if (typeof module !== 'undefined') module.exports = { awaitingReview, groupApps, matches, reviewItems, canRollback, lastPublished, publishedApps, releaseCount, testInstallUrl };
 if (typeof document !== 'undefined') {
   const $ = id => document.getElementById(id);
   let items = [], page = 0, canApprove = false, serverBusy = false, working = false, refreshing = false, decision = null;
   const pageSize = 25;
+  let publicBase = null, installing = null;
 
   function element(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
   function notice(id, text) { $(id).textContent = text; $(id).hidden = !text; }
@@ -91,6 +101,19 @@ if (typeof document !== 'undefined') {
       })));
     }
     node.append(details);
+    const testing = element('div', undefined, 'actions');
+    const download = element('a', 'Download SPK', 'button secondary');
+    download.href = `download/${encodeURIComponent(item.app.packageId)}`;
+    download.download = `${item.app.packageId}.spk`;
+    testing.append(download);
+    if (item.publicDownload && publicBase) testing.append(button('Install for testing', () => {
+      installing = item;
+      $('install-description').textContent = `Install ${item.app.name} · ${versionName(item)} on your Sandstorm server, then create a test grain. This does not approve the release.`;
+      notice('install-error', '');
+      $('install-dialog').showModal(); $('install-server').focus();
+    }));
+    node.append(testing);
+    if (!item.publicDownload) node.append(element('p', 'To test this private release, download the SPK and upload it to your Sandstorm server.', 'meta'));
     if (canApprove) {
       const actions = element('div', undefined, 'actions');
       if (item.review !== 'approved') actions.append(writeButton('Approve', () => openDecision(item, 'approve'), 'primary'));
@@ -220,6 +243,15 @@ if (typeof document !== 'undefined') {
     try { await task(); } catch (err) { notice('error', err.message); }
     finally { working = false; updateControls(); }
   }
+  $('install-cancel').onclick = () => $('install-dialog').close();
+  $('install-form').onsubmit = event => {
+    event.preventDefault();
+    try {
+      const url = testInstallUrl($('install-server').value.trim(), publicBase, installing.app.packageId);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      $('install-dialog').close();
+    } catch (err) { notice('install-error', err.message); }
+  };
   $('decision-cancel').onclick = () => $('decision').close();
   $('decision').addEventListener('cancel', event => { if (working) event.preventDefault(); });
   $('decision-form').onsubmit = async event => {
@@ -268,12 +300,13 @@ if (typeof document !== 'undefined') {
   refresh().catch(err => notice('error', err.message));
   json('public-id').then(info => {
     const url = new URL(info.autoUrl); if (!['https:', 'http:'].includes(url.protocol)) return;
+    publicBase = url.href;
     $('public-url').href = url.href; $('public-url').hidden = false;
     render();
   }).catch(err => notice('error', err.message));
   // Do not replace focused controls or interrupt a review decision during automatic refresh.
   setInterval(() => {
-    if (!document.hidden && !working && !$('decision').open && document.activeElement === document.body) {
+    if (!document.hidden && !working && !$('decision').open && !$('install-dialog').open && document.activeElement === document.body) {
       refresh().catch(err => notice('error', `Could not refresh: ${err.message}`));
     }
   }, 30000);

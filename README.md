@@ -148,6 +148,16 @@ author still requests publication. This changes the public catalog listing;
 it does not downgrade installed grains or remove other approved downloads.
 Reject a faulty release separately if its download must be removed.
 
+Reviewers and approvers can use **Download SPK** on any release, including an
+embargoed or rejected package, then upload it into their Sandstorm server and
+create a test grain. Downloads stream through the authenticated administration
+session; submitter API tokens cannot download private packages.
+
+For releases with a public package download, **Install for testing** asks for
+your Sandstorm server URL and opens that server's installer in a new tab. It
+uses the public package URL, so your server must be able to reach the marketplace.
+Neither downloading nor installing changes the release's approval state.
+
 Rollback selections persist in `/var/release-pins`, including across restarts
 and new approvals. **Use latest approved** clears the selection and returns to
 the highest eligible version. If the selected release is withdrawn, embargoed,
