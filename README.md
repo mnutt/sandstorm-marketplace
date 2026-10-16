@@ -60,7 +60,9 @@ Public marketplace ── marketplace-sync ── import.tar
 ## Build and package
 
 Requires Linux, Rust/Cargo, the Cap'n Proto schema compiler (`capnp` on PATH, or
-set `CAPNP`), and `ldd` for staging system runtime libraries. Application code,
+set `CAPNP`) with its standard schemas, and `ldd` for staging system runtime
+libraries. On Debian/Ubuntu, install both `capnproto` and `libcapnp-dev`; the latter
+provides schemas such as `/capnp/stream.capnp`. Application code,
 SPK signature verification, compression, packaging, and test orchestration are
 Rust. No Python, C++ application backend, Sandstorm SDK, `xz`, or GnuPG is needed
 for normal builds or runtime. Browser interfaces use HTML and JavaScript.
