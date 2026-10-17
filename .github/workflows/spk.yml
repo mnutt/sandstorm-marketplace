@@ -28,6 +28,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          # The main-branch CI job maintains this cache for all release tags.
+          save-if: false
       - name: Install build dependencies
         run: |
           sudo apt-get update

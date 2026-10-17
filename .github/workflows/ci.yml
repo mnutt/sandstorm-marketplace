@@ -10,6 +10,28 @@ permissions:
   contents: read
 
 jobs:
+  release-cache:
+    name: Warm release build cache
+    # Tags can restore main's cache, but cannot restore another tag's cache.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto libcapnp-dev
+      # Publishing runs xtask in debug mode and builds the grain in release mode.
+      - run: cargo build --locked -p xtask
+      - run: cargo build --locked --release -p marketplace-grain
+
   test:
     name: Rust and browser acceptance tests
     runs-on: ubuntu-22.04
