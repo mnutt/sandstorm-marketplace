@@ -209,7 +209,8 @@ impl web::Server for Session {
                     "encoded requests not accepted"
                 );
                 let body = data.get_content()?;
-                let operation = registry.begin_operation()?;
+                ensure!(api || can_approve, "approval permission denied");
+                let operation = registry.begin_operation().await;
                 if api {
                     match path {
                         "upload" => {
@@ -237,7 +238,6 @@ impl web::Server for Session {
                         _ => not_found(results.get()),
                     }
                 } else {
-                    ensure!(can_approve, "approval permission denied");
                     if path == "import" {
                         ensure!(
                             registry.package_ids()?.is_empty(),
@@ -445,7 +445,7 @@ impl byte_stream::Server for Upload {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "Upload received; processing"
                 );
-                let operation = registry.begin_operation()?;
+                let operation = registry.begin_operation().await;
                 crate::work::upload(registry, platform, operation, file, import).await?;
                 Ok(())
             }

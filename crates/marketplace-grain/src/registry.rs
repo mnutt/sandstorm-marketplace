@@ -18,10 +18,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, atomic::AtomicBool},
 };
 
 #[derive(Serialize)]
@@ -92,17 +89,12 @@ fn selected_releases(releases: &[Release]) -> Result<BTreeMap<&str, &Release>> {
 #[derive(Clone)]
 pub struct Registry {
     pub root: PathBuf,
-    busy: Arc<AtomicBool>,
+    operation: Arc<tokio::sync::Mutex<()>>,
     pub(crate) notification_busy: Arc<AtomicBool>,
     pub(crate) actor: Actor,
     pub(crate) database: Arc<Database>,
 }
-pub(crate) struct Operation(Arc<AtomicBool>);
-impl Drop for Operation {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
+pub(crate) type Operation = tokio::sync::OwnedMutexGuard<()>;
 impl Registry {
     pub fn new(root: PathBuf) -> Result<Self> {
         for directory in ["packages", "tmp"] {
@@ -111,7 +103,7 @@ impl Registry {
         let database = Arc::new(Database::open(&root)?);
         let registry = Self {
             root,
-            busy: Arc::new(AtomicBool::new(false)),
+            operation: Arc::new(tokio::sync::Mutex::new(())),
             notification_busy: Arc::new(AtomicBool::new(false)),
             actor: Actor::default(),
             database,
@@ -119,16 +111,12 @@ impl Registry {
         Ok(registry)
     }
     pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::Acquire)
+        self.operation.try_lock().is_err()
     }
-    pub(crate) fn begin_operation(&self) -> Result<Operation> {
-        ensure!(
-            self.busy
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok(),
-            "another registry operation is in progress; try again when it finishes"
-        );
-        Ok(Operation(self.busy.clone()))
+    pub(crate) async fn begin_operation(&self) -> Operation {
+        // FIFO, cancellation-safe waiting without blocking the capability RPC loop.
+        // The owned guard can stay with a blocking worker until cleanup completes.
+        self.operation.clone().lock_owned().await
     }
     pub fn temporary(&self) -> Result<tempfile::NamedTempFile> {
         Ok(tempfile::NamedTempFile::new_in(self.root.join("tmp"))?)

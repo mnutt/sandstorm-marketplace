@@ -154,6 +154,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn registry_operations_queue_in_order_and_cancel_without_holding_the_gate() -> Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let first = registry.begin_operation().await;
+        let mut cancelled = Box::pin(registry.begin_operation());
+        let mut second = Box::pin(registry.begin_operation());
+        let mut third = Box::pin(registry.begin_operation());
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert!(futures::poll!(&mut third).is_pending());
+        drop(cancelled);
+        drop(first);
+        // Polling a later arrival first must not let it jump the queue.
+        assert!(futures::poll!(&mut third).is_pending());
+        let second = tokio::time::timeout(Duration::from_secs(1), second).await?;
+        assert!(registry.is_busy());
+        assert!(futures::poll!(&mut third).is_pending());
+        drop(second);
+        let third = tokio::time::timeout(Duration::from_secs(1), third).await?;
+        drop(third);
+        assert!(!registry.is_busy());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn worker_keeps_grain_awake_and_rpc_responsive_and_honors_cancel() -> Result<()> {
         for cancel in [false, true] {
             let dir = tempfile::tempdir()?;
@@ -175,7 +201,7 @@ mod tests {
             let job = run(
                 registry.clone(),
                 platform,
-                registry.begin_operation()?,
+                registry.begin_operation().await,
                 true,
                 move |_, cancelled| {
                     ensure!(
@@ -190,7 +216,11 @@ mod tests {
             let monitor = async {
                 tokio::time::timeout(Duration::from_secs(2), started_rx).await??;
                 assert!(registry.is_busy());
-                assert!(registry.begin_operation().is_err());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), registry.begin_operation())
+                        .await
+                        .is_err()
+                );
                 // A real capability request must be serviced while the worker is blocked.
                 let response = tokio::time::timeout(
                     Duration::from_secs(2),

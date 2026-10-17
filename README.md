@@ -223,8 +223,8 @@ If final publication fails after a decision is saved, retrying the decision or r
 
 Run these commands from the repository root. First install the marketplace SPK
 and create a grain as described above. Import requires the owner or an
-**approver**, an empty grain with no submitted packages, and no other write
-operation in progress. It is a one-time bootstrap, not an incremental sync into
+**approver** and an empty grain with no submitted packages when processing begins.
+It is a one-time bootstrap, not an incremental sync into
 an existing grain.
 
 ### 1. Generate the import tarball
@@ -351,8 +351,10 @@ verification and catalog imports run on a worker thread so capability RPC remain
 responsive. During processing, the grain holds a Sandstorm `stayAwake` handle,
 shown as an ongoing notification, and releases it when processing finishes.
 Canceling that notification stops processing at cancellation checkpoints; imports
-check cancellation before committing their staged packages. Conflicting write
-requests report that an operation is already in progress.
+check cancellation before committing their staged packages. Overlapping write
+requests wait asynchronously in arrival order for the registry gate, rather than
+failing because it is busy. Canceling a waiting request removes it from the queue;
+an active worker retains the gate until its cancellation and cleanup finish.
 Static output is a snapshot: a browser spanning two publications can still see
 a removed resource disappear between requests.
 
