@@ -36,7 +36,7 @@ test('review, publish, history, rollback, rejection, and restoring latest', asyn
   await decide(page, release(page, 3), 'Reject / request update');
   expect(await publicVersion(request)).toBe(2);
   expect((await queue(request)).find(row => row.app.versionNumber === 3).reason).toBe('Please fix the broken import.');
-  await page.getByRole('link', { name: 'All apps' }).click();
+  await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
   await expect(page.getByRole('table')).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Version history' })).toBeVisible();
@@ -46,6 +46,10 @@ test('reviewers download embargoed packages but cannot approve or expose them pu
   const privateRelease = rows.find(row => row.app.versionNumber === 4);
   await page.goto(`/reviewer/${privateRelease.app.appId}/`);
   await expect(page.getByText('Read-only reviewer access.', { exact: false })).toBeVisible();
+  await expect(page.locator('.app-icon')).toBeVisible();
+  expect(await (await request.get(`/reviewer/icon/${privateRelease.app.packageId}`)).json()).toMatch(/^data:image\/svg\+xml;base64,/);
+  expect((await request.get(`/submitter/icon/${privateRelease.app.packageId}`)).ok()).toBeFalsy();
+  expect((await request.get(`/public/icon/${privateRelease.app.packageId}`)).status()).toBe(404);
   await expect(page.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
   const before = await (await request.get('/public/apps/index.json')).json();
   await release(page, 4).getByRole('link', { name: 'Preview listing' }).click();
@@ -97,7 +101,7 @@ test('idle refresh continues after navigation and discovers new submissions', as
   await page.clock.install();
   await page.goto('/admin/');
   await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
-  await page.getByRole('link', { name: 'All apps' }).click();
+  await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
   await expect(page.locator('#catalog-heading h1')).toBeFocused();
   expect((await request.post('/__test/submit', { data: '5' })).ok()).toBeTruthy();
   await page.clock.fastForward(30001);
@@ -285,9 +289,10 @@ test('app paths survive direct loads, reloads, and browser history', async ({ pa
   await page.reload();
   await expect(page.locator('#app-detail h1')).toHaveText(app.name);
   await expect(page.locator('#error')).toBeHidden();
+  await expect(page.locator('.app-icon')).toBeVisible();
   const preview = page.getByRole('link', { name: 'Preview listing' }).first();
   expect(await preview.evaluate(link => new URL(link.href).pathname)).toMatch(/^\/admin\/preview\//);
-  await page.getByRole('link', { name: 'All apps' }).click();
+  await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
   await expect(page).toHaveURL(/\/admin\/$/);
   await page.goBack();
   await expect(page.locator('#app-detail h1')).toHaveText(app.name);
@@ -324,7 +329,7 @@ test('Sandstorm shell URL follows app navigation and restores the iframe on relo
   await page.reload();
   await expect(grain.locator('#app-detail h1')).toHaveText(app.name);
   await expect(grain.locator('#error')).toBeHidden();
-  await grain.getByRole('link', { name: 'All apps' }).click();
+  await grain.getByRole('link', { name: 'Sandstorm App Market' }).click();
   await expect(page).toHaveURL(/\/shell\/$/);
   await page.goBack();
   await expect(page).toHaveURL(new RegExp(`/shell/${app.appId}/$`));

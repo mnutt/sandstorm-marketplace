@@ -196,8 +196,7 @@ and new approvals. **Use latest approved** clears the selection and returns to
 the highest eligible version. If the selected release is withdrawn, embargoed,
 or loses approval, the latest eligible approved release is used instead. The
 selection takes effect again if that release becomes eligible, until cleared.
-If final publication fails after a decision is saved, **Rebuild public site**
-under **Publishing setup & maintenance** retries publication from stored state.
+If final publication fails after a decision is saved, retrying the decision or restarting the grain retries publication from stored state.
 
 ## Sync to a tarball, then upload
 
@@ -268,7 +267,7 @@ without the import UI.
 If the form is missing, check your role, whether the grain already has packages,
 and whether another operation is running. Invalid archives fail before packages
 are committed, leaving an empty grain available for retry. If packages were
-committed but final publication failed, use **Rebuild public site** or restart
+committed but final publication failed, restart
 the grain to regenerate the site from persisted state.
 
 ### Import contents and limits
@@ -325,8 +324,7 @@ uses ordinary renames with a saved previous generation. This fallback has a brie
 interval where public requests may return a missing-page response, but never
 exposes a partially built site. Failed installation restores the previous site;
 an interrupted swap is recovered on the next publication attempt before rendering.
-Failed rendering leaves the previous site intact. Retrying the operation, clicking **Rebuild public site**, or
-restarting the grain rebuilds from persisted state. Registry mutations are
+Failed rendering leaves the previous site intact. Retrying the operation or restarting the grain rebuilds from persisted state. Registry mutations are
 serialized; this implementation rebuilds the full site per change. Upload
 verification and catalog imports run on a worker thread so capability RPC remains
 responsive. During processing, the grain holds a Sandstorm `stayAwake` handle,

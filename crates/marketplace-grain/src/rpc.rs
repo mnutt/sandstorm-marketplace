@@ -137,6 +137,11 @@ impl web::Server for Session {
                     "marketplace.js" => content(results.get(), "text/javascript; charset=utf-8", marketplace_web::marketplace_script()),
                     "preview.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("preview.js")),
                     path if path.starts_with("preview/") => content(results.get(), "text/html; charset=utf-8", registry.preview(&path[8..])?.as_bytes()),
+                    path if path.starts_with("icon/") => {
+                        let metadata = registry.metadata(&path[5..])?;
+                        let entry = crate::catalog::parse(metadata.get_root()?, 0)?;
+                        content(results.get(), "application/json", &serde_json::to_vec(&entry.icon_data_url())?);
+                    }
                     "review.js" => content(results.get(), "text/javascript; charset=utf-8", include_bytes!("review.js")),
                     path if path.starts_with("download/") => {
                         let id = &path[9..];

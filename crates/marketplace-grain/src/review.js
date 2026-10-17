@@ -244,7 +244,9 @@ if (typeof document !== "undefined") {
   }
   function release(item, versions) {
     const node = element("section", undefined, "release");
-    node.append(element("h3", versionName(item)), badges(item));
+    const heading = element("div", undefined, "release-heading");
+    heading.append(element("h3", versionName(item)));
+    node.append(heading, badges(item));
     node.append(
       element(
         "p",
@@ -331,7 +333,7 @@ if (typeof document !== "undefined") {
             openDecision(item, "rollback"),
           ),
         );
-      node.append(actions);
+      heading.append(actions);
     }
     return node;
   }
@@ -344,10 +346,6 @@ if (typeof document !== "undefined") {
   function renderApp(groups) {
     const detail = $("app-detail");
     detail.replaceChildren();
-    const back = element("a", "← All apps", "back");
-    back.href = appBase.href;
-    back.dataset.adminNavigation = "";
-    detail.append(back);
     const appId = currentAppId();
     const versions = groups.find((group) => group[0].app.appId === appId);
     if (!versions) {
@@ -361,7 +359,22 @@ if (typeof document !== "undefined") {
     const item = current || versions[0];
     detail.append(element("h1", item.app.name, "catalog-title"));
     const info = element("section", undefined, "card app-info");
-    info.append(
+    const infoBody = element("div", undefined, "app-info-body");
+    const sidebar = element("div", undefined, "app-info-sidebar");
+    if (item.app.imageId && !item.validationError) {
+      const icon = element("img", undefined, "app-icon");
+      icon.alt = "";
+      icon.width = 96;
+      icon.height = 96;
+      icon.hidden = true;
+      sidebar.append(icon);
+      json(`icon/${encodeURIComponent(item.app.packageId)}`).then(url => {
+        if (url) { icon.src = url; icon.hidden = false; }
+      }).catch(() => {});
+    }
+    info.append(infoBody);
+    if (sidebar.childElementCount) info.append(sidebar);
+    infoBody.append(
       element("h2", "App information"),
       element("p", item.app.shortDescription || ""),
       element(
@@ -386,7 +399,7 @@ if (typeof document !== "undefined") {
     deprecation.append(element("h2", "Deprecation"), element("p",
       item.app.deprecation
         ? "Deprecated. Hidden from marketplace indexes; direct listings and downloads remain available."
-        : "Active. This app appears in marketplace indexes when it has a public release."));
+        : "Not deprecated. This app appears in marketplace indexes when it has a public release."));
     if (item.app.deprecation?.replacementAppId) {
       const replacement = element("a", "View replacement app");
       replacement.href = new URL(`${encodeURIComponent(item.app.deprecation.replacementAppId)}/`, appBase).href;
@@ -427,9 +440,8 @@ if (typeof document !== "undefined") {
       if (item.app.deprecation) form.append(writeButton("Restore app to indexes", () => update(null)));
       deprecation.append(form);
     }
-    info.append(deprecation);
     if (item.pinnedPackageId) {
-      info.append(
+      infoBody.append(
         element(
           "p",
           current?.app.packageId === item.pinnedPackageId
@@ -439,7 +451,7 @@ if (typeof document !== "undefined") {
         ),
       );
       if (canApprove)
-        info.append(
+        infoBody.append(
           writeButton("Use latest approved", () =>
             openDecision(item, "latest"),
           ),
@@ -455,7 +467,7 @@ if (typeof document !== "undefined") {
       ),
     );
     for (const entry of versions) history.append(release(entry, versions));
-    detail.append(info, activityHistory(appId), history);
+    detail.append(info, activityHistory(appId), history, deprecation);
   }
   function renderAuditEvent(rawEvent) {
     const event = auditEventForDisplay(rawEvent);
@@ -805,7 +817,7 @@ if (typeof document !== "undefined") {
         } else {
           notice(
             "decision-error",
-            `${err.message} If the decision was saved but publication failed, rebuild the public site.`,
+            `${err.message} If the decision was saved but publication failed, retry the decision or restart the grain.`,
           );
         }
       } finally {
@@ -854,38 +866,6 @@ if (typeof document !== "undefined") {
       }
     });
   };
-  $("reindex").onclick = () =>
-    runAction(async () => {
-      await request("reindex", "");
-      await refresh();
-      notice("message", "Public site rebuilt.");
-    });
-  $("keybase").onclick = () =>
-    runAction(async () => {
-      const descriptor = await (await request("keybase-pb-descriptor")).text();
-      window.parent.postMessage(
-        {
-          powerboxRequest: {
-            rpcId: "keybase-request",
-            query: [descriptor],
-            saveLabel: { defaultText: "Keybase API" },
-          },
-        },
-        "*",
-      );
-    });
-  window.addEventListener("message", (event) => {
-    if (
-      event.source !== window.parent ||
-      event.data?.rpcId !== "keybase-request" ||
-      !event.data.token
-    )
-      return;
-    runAction(async () => {
-      await request("keybase-pb-token", event.data.token);
-      notice("message", "Keybase connected.");
-    });
-  });
   refresh().catch((err) => notice("error", err.message));
   json("public-id")
     .then((info) => {

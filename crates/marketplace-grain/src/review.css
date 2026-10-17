@@ -68,8 +68,6 @@ summary { cursor: pointer; color: var(--accent); }
 .empty { text-align: center; padding: 3rem 1.25rem; color: var(--muted); }
 .review-rail .empty { padding: 1.5rem .5rem; }
 .reason { border-left: 3px solid #b96a7b; padding: .5rem .75rem; background: #fff0f3; white-space: pre-wrap; overflow-wrap: anywhere; }
-.setup { margin-top: 2rem; border-top: 1px solid #cbbdd2; padding-top: 1.25rem; }
-.setup pre { overflow: auto; background: #f3edf6; padding: .75rem; }
 dialog { width: min(560px, calc(100% - 32px)); border: 1px solid var(--line); border-radius: 0; padding: 1.75rem; color: var(--ink); box-shadow: 2px 4px 0 #a694b2; }
 dialog::backdrop { background: #181327aa; }
 dialog .actions { justify-content: flex-end; }
@@ -120,3 +118,17 @@ dialog .actions { justify-content: flex-end; }
 
 .audit-history .audit-date { padding: 0; border: 0; background: none; color: var(--accent); text-align: left; text-decoration: underline; text-underline-offset: .15em; white-space: normal; }
 .audit-history .audit-date:hover { color: #5d246b; }
+
+.app-info { display: flex; align-items: flex-start; gap: 1.5rem; }
+.app-info-body { flex: 1; min-width: 0; }
+.app-info-sidebar { display: flex; flex: 0 0 96px; flex-direction: column; align-items: center; gap: .75rem; }
+.app-info .app-icon { width: 96px; height: 96px; object-fit: contain; flex-shrink: 0; margin: 0; }
+.release-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: .75rem 1.5rem; flex-wrap: wrap; margin-bottom: .75rem; }
+.release-heading h3 { margin: .45rem 0 0; }
+.release-heading .actions { margin: 0 0 0 auto; justify-content: flex-end; }
+@media (max-width: 600px) {
+  .app-info { gap: 1rem; }
+  .app-info-sidebar { flex-basis: 80px; }
+  .app-info .app-icon { width: 64px; height: 64px; }
+  .release-heading .actions { flex-basis: 100%; }
+}

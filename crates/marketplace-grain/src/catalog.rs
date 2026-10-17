@@ -15,27 +15,33 @@ struct Asset<'a> {
     name: String,
     data: &'a [u8],
 }
-impl Entry<'_> {
-    pub fn image_data_urls(&self) -> std::collections::BTreeMap<String, String> {
+impl Asset<'_> {
+    fn data_url(&self) -> String {
         use base64::Engine;
+        let mime = if self.name.ends_with(".svg") {
+            "image/svg+xml"
+        } else if self.name.ends_with(".png") {
+            "image/png"
+        } else {
+            "image/jpeg"
+        };
+        format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(self.data)
+        )
+    }
+}
+impl Entry<'_> {
+    pub fn icon_data_url(&self) -> Option<String> {
         self.assets
             .iter()
-            .map(|asset| {
-                let mime = if asset.name.ends_with(".svg") {
-                    "image/svg+xml"
-                } else if asset.name.ends_with(".png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-                (
-                    asset.name.clone(),
-                    format!(
-                        "data:{mime};base64,{}",
-                        base64::engine::general_purpose::STANDARD.encode(asset.data)
-                    ),
-                )
-            })
+            .find(|asset| asset.name == self.app.image_id)
+            .map(Asset::data_url)
+    }
+    pub fn image_data_urls(&self) -> std::collections::BTreeMap<String, String> {
+        self.assets
+            .iter()
+            .map(|asset| (asset.name.clone(), asset.data_url()))
             .collect()
     }
 
