@@ -50,7 +50,8 @@ Public marketplace ── marketplace-sync ── import.tar
                                               │
                                   verify and import packages
                                               │
-                               /var/packages (persistent state)
+                               /var/packages (immutable SPKs)
+                               /var/marketplace.sqlite (metadata and history)
                                               │
                                /var/catalog (generated catalog)
                                               │
@@ -128,9 +129,8 @@ release’s description, images, and SPK download/install URLs. Search, category
 preserve this mode and the chosen Sandstorm host. Normal URLs (or
 `?experimental=false`) use the approved catalog. Pending versions older than an
 approved public release are excluded, including while a rollback is selected.
-Approval history survives revocation and restarts in each package's
-`ever-approved` marker; existing approved statuses and publication dates also
-establish history.
+Approval history survives revocation and restarts in SQLite's
+`releases.ever_approved` field.
 
 To use this marketplace for a Sandstorm installation, set its App Market URL
 and App Index URL to the public site URL in the server's configuration.
@@ -191,7 +191,7 @@ your Sandstorm server URL and opens that server's installer in a new tab. It
 uses the public package URL, so your server must be able to reach the marketplace.
 Neither downloading nor installing changes the release's approval state.
 
-Rollback selections persist in `/var/release-pins`, including across restarts
+Rollback selections persist in SQLite, including across restarts
 and new approvals. **Use latest approved** clears the selection and returns to
 the highest eligible version. If the selected release is withdrawn, embargoed,
 or loses approval, the latest eligible approved release is used instead. The
@@ -294,11 +294,6 @@ grain storage for the uploaded tarball, extracted packages, verification, and
 publication staging. See [Logs and temporary storage](#logs-and-temporary-storage)
 for progress logging and grain storage details.
 
-For a private migration of the old index grain, restore its `/var/packages`,
-`/var/apps`, and `/var/keybase` data (and optional `/var/descriptions` and
-`/var/keybase-token`) into the new grain's storage; startup reconstructs public
-output. This is a separate migration path from the public snapshot import.
-
 ## Development
 
 To develop against a local Sandstorm server, run from the repository root:
@@ -321,7 +316,7 @@ then restart the development grain to load the rebuilt executable. Restart
 The root pkgdef records the public app ID; developers do not need its private
 key. If creating a separately signed fork, update that ID to match your key.
 
-The grain stores packages and submission state under `/var/packages`, builds a
+The grain stores SPKs under `/var/packages` and metadata in `/var/marketplace.sqlite`, builds a
 private catalog under `/var/catalog`, and calls the publisher library after state
 changes. The publisher stages a complete replacement next to `/var/www`, then
 uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations when available.
@@ -463,7 +458,7 @@ to the replacement, if selected. Public SPKs remain available. Deprecation does 
 approval, author withdrawal, or rollback behavior.
 
 Use **Restore app to indexes** to undo deprecation. This policy is app-level and
-survives new releases and restarts. `/var/deprecations.json` is authoritative and
+survives new releases and restarts. App policy is stored in SQLite and
 included in Sandstorm grain backups. A public catalog sync/import only includes
 listed apps; it is not a full grain backup and does not preserve deprecated apps.
 
@@ -494,26 +489,57 @@ app decision and its actor. This reference provides context, not proof that one
 decision was the sole cause when several changes preceded publication. Recovery
 observations use their observation time rather than inventing a publication time.
 
-History is private under `/var/audit/<appId>/`: numbered JSON chunks contain at
-most **100 events**, with a small `head.json` recording the latest event number.
-The UI fetches **50 events** at a time through `audit/<appId>[/<before-event-number>]`.
-A page reads at most two chunks, without scanning older history; stable cursors
-exclude newer arrivals from older pages. Loaded pages survive automatic admin
-refreshes; **Refresh** explicitly reloads the newest page. Events are
-limited to 32 KiB, and new rejection reasons to 8 KiB of JSON-encoded text.
-Oversized legacy reasons use an explicitly marked excerpt plus a SHA-256 digest.
-Completed chunks are immutable during normal operation; only the current chunk
-and small metadata files change on append. There is no automatic history deletion.
+History is private in SQLite's `audit_events` table, indexed by app ID and event
+number. The UI fetches **50 events** at a time through
+`audit/<appId>[/<before-event-number>]`. An indexed range query reads each page
+without scanning older history; stable cursors exclude newer arrivals. Loaded
+pages survive automatic admin refreshes; **Refresh** reloads the newest page.
+Events are limited to 32 KiB, and new rejection reasons to 8 KiB of JSON-encoded
+text.
+There is no automatic history deletion.
 
-A temporary `/var/audit-transaction.json` redo journal makes state changes and
-history recoverable together, including staged package moves. It is removed after
-commit and does not accumulate history. Publication visibility checkpoints live
-beside each private package. Startup and later operations recover interrupted
-transactions; publication reconciles the installed public output with those
-checkpoints. Existing packages receive baseline events with their observed state,
-not fabricated historical decisions. Imports record the importing session and
-catalog state, without claiming to know upstream reviewers.
+State changes and their audit entries commit in one SQLite transaction. Publication
+records its intended package visibility and decision context before building the
+site. A public `generation.txt` contains only the generation number and is installed
+with the site. After installation, visibility checkpoints and events commit together.
+If installation succeeds but the database update is interrupted, the next publication
+or decision reconciles that generation first. Imports record
+the importing session and catalog state without claiming to know upstream reviewers.
 
-Audit files are included in Sandstorm grain backups, never in the generated public
+Private state is included in Sandstorm grain backups, never in the generated public
 site or public catalog export. This is an application history, not a tamper-proof
 ledger against someone who can modify grain storage or restore an older backup.
+
+### SQLite storage
+
+`/var/marketplace.sqlite` is authoritative for all registry metadata. The schema is
+in [`schema.sql`](crates/marketplace-grain/src/schema.sql):
+
+| Tables | Contents |
+| --- | --- |
+| `apps` | Rollback selection, deprecation/replacement, description override, audit counter |
+| `releases` | App/build identity, verified Cap'n Proto metadata, review and author state, timestamps, approval history, visibility checkpoint |
+| `audit_events` | Per-app numbered events, actor snapshots and JSON details |
+| `author_profiles`, `release_author_profiles` | Cached Keybase profiles and imported per-release author information |
+| `capabilities` | Saved capability tokens |
+| `registry_state` | State revision and installed generation |
+| `publication_generations`, `publication_items`, `publication_causes` | Publication attempts, visibility snapshots and decision context |
+
+SPKs remain immutable files at `/var/packages/<packageId>/spk`. `/var/catalog` and
+`/var/www` are generated output. Verified manifest data and cached Keybase profiles
+use Cap'n Proto encoding in BLOB columns; submission state uses
+ordinary SQL columns. The unsigned 64-bit submission sequence uses an eight-byte
+big-endian BLOB to avoid narrowing it to SQLite's signed integer range.
+
+SQLite is bundled into the executable. Foreign keys and full synchronous durability
+are enabled; the database uses rollback journaling with short serialized write
+transactions. Package verification, network calls, and site rendering happen outside
+those transactions. SPKs become durable before their database rows commit; a failed
+upload or import may leave unreferenced files, which verified retries can replace.
+Generation summaries remain available; full visibility/cause snapshots are retained
+only for the current and most recent prepared generation.
+
+On first startup, the grain creates the schema and records its version in one
+transaction. Subsequent startups open the existing database; unsupported schema
+versions are rejected. Full grain backups must include the database and SPKs
+together.

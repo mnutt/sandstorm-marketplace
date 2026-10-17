@@ -4,7 +4,7 @@ use crate::{
     grain_capnp::session_context,
     hack_session_capnp::hack_session_context,
     powerbox_capnp::powerbox_descriptor,
-    registry::{Registry, atomic_write, write_message},
+    registry::Registry,
     rpc::{PlatformSlot, cast, error},
     util_capnp::byte_stream,
     web_session_capnp::web_session as web,
@@ -51,10 +51,13 @@ pub async fn claim(
         .init_label()
         .set_default_text("Keybase API endpoint");
     let saved = save.send().promise.await?;
-    atomic_write(
-        &registry.root.join("keybase-token"),
-        saved.get()?.get_token()?,
-    )
+    registry.database.transaction(|db| {
+        db.execute(
+            "INSERT OR REPLACE INTO capabilities VALUES('keybase',?)",
+            [saved.get()?.get_token()?],
+        )?;
+        Ok(())
+    })
 }
 pub async fn lookup(
     registry: &Registry,
@@ -71,11 +74,18 @@ pub async fn lookup(
         .clone()
         .context("platform not connected")?;
     let mut restore = platform.restore_request();
-    restore
-        .get()
-        .set_token(&std::fs::read(registry.root.join("keybase-token")).context(
-            "Keybase is not connected; use Connect Keybase before looking up an author",
-        )?);
+    restore.get().set_token(
+        &registry
+            .database
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT token FROM capabilities WHERE name='keybase'",
+                    [],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )?)
+            })
+            .context("Keybase is not connected; use Connect Keybase before looking up an author")?,
+    );
     let restored = restore.send().promise.await?;
     let endpoint: web::Client = restored.get()?.get_cap().get_as()?;
     let bytes = Rc::new(RefCell::new(Vec::new()));
@@ -159,7 +169,17 @@ pub async fn lookup(
         }
         result[field] = json!(handles);
     }
-    write_message(&registry.root.join("keybase").join(fingerprint), &message)?;
+    registry.database.transaction(|db| {
+        db.execute(
+            "INSERT OR REPLACE INTO author_profiles VALUES(?,?)",
+            rusqlite::params![fingerprint, crate::database::encode(&message)?],
+        )?;
+        db.execute(
+            "UPDATE registry_state SET state_revision=state_revision+1",
+            [],
+        )?;
+        Ok(())
+    })?;
     registry.publish()?;
     Ok(result)
 }

@@ -9,3 +9,5 @@ pub mod registry;
 pub mod rpc;
 pub mod spk;
 mod work;
+
+mod database;

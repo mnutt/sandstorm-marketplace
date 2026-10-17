@@ -1,4 +1,5 @@
-use crate::audit::{Actor, Event, Transaction};
+use crate::audit::{Actor, Event};
+use crate::database::{Change, Database, decode, encode};
 use crate::{app_index_capnp as a, ids, package_capnp as p, spk, submit_capnp as s};
 use anyhow::{Context, Result, bail, ensure};
 use capnp::{
@@ -9,6 +10,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use marketplace_model::app_index::{
     AppDetailsForMarket, AppIndexForMarket, AppSummary, AuthorIdentity, Deprecation,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -89,7 +91,7 @@ pub struct Registry {
     pub root: PathBuf,
     busy: Arc<AtomicBool>,
     pub(crate) actor: Actor,
-    pub(crate) audit_lock: Arc<std::sync::Mutex<()>>,
+    pub(crate) database: Arc<Database>,
 }
 pub(crate) struct Operation(Arc<AtomicBool>);
 impl Drop for Operation {
@@ -99,17 +101,16 @@ impl Drop for Operation {
 }
 impl Registry {
     pub fn new(root: PathBuf) -> Result<Self> {
-        for directory in ["packages", "apps", "keybase", "tmp", "release-pins"] {
+        for directory in ["packages", "tmp"] {
             fs::create_dir_all(root.join(directory))?;
         }
+        let database = Arc::new(Database::open(&root)?);
         let registry = Self {
             root,
             busy: Arc::new(AtomicBool::new(false)),
             actor: Actor::default(),
-            audit_lock: Arc::new(std::sync::Mutex::new(())),
+            database,
         };
-        registry.recover_audit()?;
-        registry.audit_baseline()?;
         Ok(registry)
     }
     pub fn is_busy(&self) -> bool {
@@ -135,26 +136,13 @@ impl Registry {
         Ok(self.root.join("packages").join(id))
     }
     pub fn metadata(&self, id: &str) -> Result<Message> {
-        read_message(&self.package_dir(id)?.join("metadata"))
+        self.database.metadata(id)
     }
     pub fn status(&self, id: &str) -> Result<Message> {
-        read_message(&self.package_dir(id)?.join("status"))
+        self.database.status(id)
     }
     pub fn package_ids(&self) -> Result<Vec<String>> {
-        let mut ids = Vec::new();
-        for entry in fs::read_dir(self.root.join("packages"))? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() && entry.path().join("spk").is_file() {
-                let id = entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| anyhow::anyhow!("invalid package filename"))?;
-                self.package_dir(&id)?;
-                ids.push(id);
-            }
-        }
-        ids.sort();
-        Ok(ids)
+        self.database.ids()
     }
     pub fn upload(&self, upload: &Path) -> Result<String> {
         self.upload_cancellable(upload, &AtomicBool::new(false))
@@ -165,7 +153,6 @@ impl Registry {
         upload: &Path,
         cancelled: &AtomicBool,
     ) -> Result<String> {
-        self.recover_audit()?;
         crate::work::check_cancelled(cancelled)?;
         let started = std::time::Instant::now();
         tracing::info!(bytes = fs::metadata(upload)?.len(), "Verifying SPK");
@@ -174,7 +161,7 @@ impl Registry {
         let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
         let id = hex::encode(ids::package_bytes(info.get_package_id()?));
         let dest = self.package_dir(&id)?;
-        if dest.join("spk").exists() {
+        if self.database.contains(&id)? {
             tracing::info!(package_id = %id, "Package already stored");
             return Ok(id);
         }
@@ -220,26 +207,27 @@ impl Registry {
             }
         }
         fs::create_dir_all(&dest)?;
-        write_message(&dest.join("metadata"), &verified)?;
-        atomic_write(
-            &dest.join("received-at"),
-            chrono::Utc::now().to_rfc3339().as_bytes(),
-        )?;
+        let received_at = Some(chrono::Utc::now().to_rfc3339());
         let mut status = Builder::new_default();
         status.init_root::<s::submission_status::Builder>();
-        write_message(&dest.join("status"), &status)?;
-        // SPK existence is the commit marker. Metadata and initial status precede it.
+        // Install the immutable file before the database commit. A crash can leave
+        // an unreferenced file, which a verified retry safely replaces.
         let mut staged = tempfile::NamedTempFile::new_in(&dest)?;
         std::io::copy(&mut File::open(upload)?, &mut staged)?;
         staged.as_file().sync_all()?;
         let (_, staged_path) = staged.keep()?;
         File::open(&dest)?.sync_all()?;
+        fs::rename(staged_path, dest.join("spk"))?;
+        File::open(&dest)?.sync_all()?;
+        File::open(self.root.join("packages"))?.sync_all()?;
         self.audit_commit(
-            Transaction {
-                moves: vec![(staged_path, dest.join("spk"))],
-                writes: vec![(dest.join("audit-tracked"), Vec::new())],
-                ..Default::default()
-            },
+            vec![Change::Release {
+                id: id.clone(),
+                metadata: encode(&verified)?,
+                status: encode(&status)?,
+                received_at,
+                ever_approved: false,
+            }],
             vec![Event::new(
                 &ids::app_id(&app),
                 Some((&id, info.get_version())),
@@ -263,7 +251,7 @@ impl Registry {
         let request = request.get_root::<s::submission_request::Reader>()?;
         let id = hex::encode(ids::package_bytes(request.get_package_id()?));
         let mut response = Builder::new_default();
-        if self.package_dir(&id)?.join("spk").exists() {
+        if self.database.contains(&id)? {
             let message = self.metadata(&id)?;
             let info = message.get_root::<p::verified_info::Reader>()?;
             let key = ids::current_key(&ids::app_bytes(info.get_app_id()?))?;
@@ -295,7 +283,6 @@ impl Registry {
         Ok(output)
     }
     pub fn set_state(&self, id: &str, state: s::SubmissionState, sequence: u64) -> Result<()> {
-        self.recover_audit()?;
         self.audit_publication()?;
         tracing::info!(
             package_id = id,
@@ -322,7 +309,6 @@ impl Registry {
     }
     #[tracing::instrument(skip_all, fields(package_id = id, action = action), err(Debug))]
     pub fn review(&self, id: &str, action: &str, reason: &str) -> Result<()> {
-        self.recover_audit()?;
         self.audit_publication()?;
         ensure!(
             serde_json::to_vec(reason)?.len() <= 8192,
@@ -360,13 +346,7 @@ impl Registry {
             let next = if action == "rollback" { id } else { "" };
             if previous != next {
                 self.audit_commit(
-                    Transaction {
-                        writes: vec![(
-                            self.root.join("release-pins").join(&app_id),
-                            next.as_bytes().to_vec(),
-                        )],
-                        ..Default::default()
-                    },
+                    vec![Change::Pin(app_id.clone(), next.into())],
                     vec![Event::new(
                         &app_id,
                         Some((id, info.get_version())),
@@ -425,10 +405,6 @@ impl Registry {
         );
         let old = self.status(id)?;
         let previous_status = old.get_root::<s::submission_status::Reader>()?;
-        // Preserve approval history even if an embargoed approval is later revoked.
-        if matches!(previous_status.which()?, s::submission_status::Approved(_)) {
-            self.remember_approval(id)?;
-        }
         let mut message = Builder::new_default();
         message.set_root(previous_status)?;
         {
@@ -467,33 +443,23 @@ impl Registry {
         };
         let mut bytes = Vec::new();
         serialize::write_message(&mut bytes, &message)?;
-        self.audit_commit(
-            Transaction {
-                writes: vec![(self.package_dir(id)?.join("status"), bytes)],
-                ..Default::default()
-            },
-            events,
-        )?;
-        if matches!(next_status.which()?, s::submission_status::Approved(_)) {
-            self.remember_approval(id)?;
-        }
-        Ok(())
-    }
-    fn remember_approval(&self, id: &str) -> Result<()> {
-        let marker = self.package_dir(id)?.join("ever-approved");
-        if !marker.exists() {
-            atomic_write(&marker, b"")?;
-        }
+        self.audit_commit(vec![Change::Status(id.into(), bytes)], events)?;
         Ok(())
     }
     // A pin only applies while its release is approved and the author permits publication.
     // Otherwise use the newest eligible release, without overriding author withdrawal.
     fn release_pin(&self, app_id: &str) -> Result<String> {
-        match fs::read_to_string(self.root.join("release-pins").join(app_id)) {
-            Ok(value) => Ok(value),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(err) => Err(err.into()),
-        }
+        self.database.read(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT pinned_package_id FROM apps WHERE app_id=?",
+                    [app_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+                .unwrap_or_default())
+        })
     }
     fn releases(&self) -> Result<Vec<Release>> {
         let mut pins = BTreeMap::new();
@@ -512,7 +478,13 @@ impl Registry {
             let state = status.get_root::<s::submission_status::Reader>()?;
             let ever_approved = state.get_publish_date() != 0
                 || matches!(state.which()?, s::submission_status::Approved(_))
-                || self.package_dir(&id)?.join("ever-approved").is_file();
+                || self.database.read(|db| {
+                    Ok(db.query_row(
+                        "SELECT ever_approved FROM releases WHERE package_id=?",
+                        [&id],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })?;
             releases.push(Release {
                 status,
                 ever_approved,
@@ -527,16 +499,11 @@ impl Registry {
     }
 
     fn deprecations(&self) -> Result<BTreeMap<String, Deprecation>> {
-        match fs::read(self.root.join("deprecations.json")) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-            Err(error) => Err(error.into()),
-        }
+        self.database.deprecations()
     }
 
     /// App-level policy, independent of package approval and rollback selection.
     pub fn set_deprecation(&self, app_id: &str, value: Option<Deprecation>) -> Result<()> {
-        self.recover_audit()?;
         self.audit_publication()?;
         ids::parse_app_id(app_id)?;
         let releases = self.releases()?;
@@ -568,13 +535,7 @@ impl Registry {
         let next = serde_json::to_value(deprecations.get(app_id))?;
         if previous != next {
             self.audit_commit(
-                Transaction {
-                    writes: vec![(
-                        self.root.join("deprecations.json"),
-                        serde_json::to_vec(&deprecations)?,
-                    )],
-                    ..Default::default()
-                },
+                vec![Change::Deprecations(deprecations)],
                 vec![Event::new(
                     app_id,
                     None,
@@ -592,26 +553,10 @@ impl Registry {
     }
 
     fn description_overrides(&self) -> Result<BTreeMap<String, String>> {
-        let path = self.root.join("descriptions");
-        if !path.exists() {
-            return Ok(BTreeMap::new());
-        }
-        let message = read_message(&path)?;
-        message
-            .get_root::<a::short_description_overrides::Reader>()?
-            .get_items()?
-            .iter()
-            .map(|item| {
-                Ok((
-                    item.get_app_id()?.to_str()?.to_owned(),
-                    item.get_short_description()?.to_str()?.to_owned(),
-                ))
-            })
-            .collect()
+        self.database.read(|db| Ok(db.prepare("SELECT app_id,description_override FROM apps WHERE description_override IS NOT NULL")?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?))
     }
     #[tracing::instrument(skip_all, err(Debug))]
     pub fn publish(&self) -> Result<()> {
-        self.recover_audit()?;
         self.audit_publication()?;
         let started = std::time::Instant::now();
         let releases = self.releases()?;
@@ -704,7 +649,21 @@ impl Registry {
                 &serde_json::to_vec(&AppIndexForMarket { apps })?,
             )?;
         }
-        marketplace_web::publish::publish(&catalog, &self.root.join("www"))?;
+        let generation = self.prepare_publication(&catalog)?;
+        if let Err(error) = marketplace_web::publish::publish_generation(
+            &catalog,
+            &self.root.join("www"),
+            generation,
+        ) {
+            self.database.transaction(|db| {
+                db.execute(
+                    "UPDATE publication_generations SET last_error=? WHERE generation_id=?",
+                    rusqlite::params![format!("{error:#}"), generation],
+                )?;
+                Ok(())
+            })?;
+            return Err(error);
+        }
         self.audit_publication()?;
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -752,7 +711,7 @@ impl Registry {
                 .catalog_entry(info, status.get_publish_date())
                 .map(|entry| (entry.app, entry.details));
             let validation_error = entry.as_ref().err().map(|err| format!("{err:#}"));
-            // Older builds may have stored malformed metadata. Keep these releases
+            // Keep releases with malformed stored metadata
             // visible so an approver can reject them and restore publication.
             let (mut app, details) = entry.unwrap_or_else(|_| {
                 (
@@ -787,7 +746,13 @@ impl Registry {
                 _ => ("pending", ""),
             };
             let current = selected.get(app.app_id.as_str()).map(|release| &release.id) == Some(id);
-            let received_at = fs::read_to_string(self.package_dir(&id)?.join("received-at")).ok();
+            let received_at = self.database.read(|db| {
+                Ok(db.query_row(
+                    "SELECT received_at FROM releases WHERE package_id=?",
+                    [id],
+                    |r| r.get(0),
+                )?)
+            })?;
             queue.push(ReviewRelease {
                 current,
                 pinned_package_id: release.pin.clone(),
@@ -832,58 +797,40 @@ impl Registry {
         if entry.app.author.is_none() {
             // Imported profiles describe this exact package, not a verified Keybase
             // identity. Keep them separate so a live lookup always takes precedence.
-            let path = self
-                .package_dir(&entry.app.package_id)?
-                .join("catalog-author.json");
-            match fs::read(path) {
-                Ok(bytes) => entry.app.author = Some(serde_json::from_slice(&bytes)?),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            if let Some(profile) = self.database.imported_author(&entry.app.package_id)? {
+                entry.app.author = Some(serde_json::from_str(&profile)?);
             }
         }
         Ok(entry)
     }
     fn author_profile(&self, fingerprint: &str) -> Result<Option<AuthorIdentity>> {
-        Ok(
-            if !fingerprint.is_empty() && self.root.join("keybase").join(fingerprint).exists() {
-                ensure!(
-                    fingerprint.bytes().all(|c| c.is_ascii_hexdigit()),
-                    "invalid PGP fingerprint"
-                );
-                let profile = read_message(&self.root.join("keybase").join(fingerprint))?;
-                let p = profile.get_root::<a::keybase_identity::Reader>()?;
-                let first = |list: capnp::text_list::Reader<'_>| -> Result<String> {
-                    Ok(if list.is_empty() {
-                        String::new()
-                    } else {
-                        list.get(0)?.to_str()?.to_string()
-                    })
-                };
-                Some(AuthorIdentity {
-                    name: p.get_name()?.to_str()?.to_string(),
-                    keybase_username: p.get_keybase_handle()?.to_str()?.to_string(),
-                    picture: p.get_picture()?.to_str()?.to_string(),
-                    github_username: first(p.get_github_handles()?)?,
-                    twitter_username: first(p.get_twitter_handles()?)?,
-                    hackernews_username: first(p.get_hackernews_handles()?)?,
-                    reddit_username: first(p.get_reddit_handles()?)?,
+        Ok(if let Some(bytes) = self.database.profile(fingerprint)? {
+            ensure!(
+                fingerprint.bytes().all(|c| c.is_ascii_hexdigit()),
+                "invalid PGP fingerprint"
+            );
+            let profile = decode(&bytes)?;
+            let p = profile.get_root::<a::keybase_identity::Reader>()?;
+            let first = |list: capnp::text_list::Reader<'_>| -> Result<String> {
+                Ok(if list.is_empty() {
+                    String::new()
+                } else {
+                    list.get(0)?.to_str()?.to_string()
                 })
-            } else {
-                None
-            },
-        )
+            };
+            Some(AuthorIdentity {
+                name: p.get_name()?.to_str()?.to_string(),
+                keybase_username: p.get_keybase_handle()?.to_str()?.to_string(),
+                picture: p.get_picture()?.to_str()?.to_string(),
+                github_username: first(p.get_github_handles()?)?,
+                twitter_username: first(p.get_twitter_handles()?)?,
+                hackernews_username: first(p.get_hackernews_handles()?)?,
+                reddit_username: first(p.get_reddit_handles()?)?,
+            })
+        } else {
+            None
+        })
     }
-}
-pub fn read_message(path: &Path) -> Result<Message> {
-    Ok(serialize::read_message(
-        File::open(path).with_context(|| format!("opening registry file {}", path.display()))?,
-        spk::limits(16 * 1024 * 1024),
-    )?)
-}
-pub fn write_message(path: &Path, message: &Builder<capnp::message::HeapAllocator>) -> Result<()> {
-    let mut bytes = Vec::new();
-    serialize::write_message(&mut bytes, message)?;
-    atomic_write(path, &bytes)
 }
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path.parent().context("missing parent directory")?;
@@ -902,22 +849,13 @@ pub(crate) fn audit_status(status: s::submission_status::Reader<'_>) -> Result<s
         s::submission_status::NeedsUpdate(reason) => ("needsUpdate", reason?.to_str()?),
         _ => ("unknown", ""),
     };
-    // Legacy rejection reasons were unbounded; preserve a bounded excerpt plus a
-    // digest so changes beyond the excerpt remain distinguishable.
-    use sha2::{Digest, Sha256};
-    let excerpt: String = if serde_json::to_vec(reason)?.len() <= 8192 {
-        reason.to_owned()
-    } else {
-        reason.chars().take(1024).collect()
-    };
     let request_state = match status.get_request_state()? {
         s::SubmissionState::Ignore => "ignore",
         s::SubmissionState::Review => "review",
         s::SubmissionState::Publish => "publish",
     };
     Ok(json!({"requestState": request_state,
-        "review": review, "reason": excerpt, "reasonTruncated": excerpt.len() < reason.len(),
-        "reasonSha256": hex::encode(Sha256::digest(reason.as_bytes()))}))
+        "review": review, "reason": reason}))
 }
 
 impl Registry {
@@ -937,59 +875,15 @@ impl Registry {
             details,
         ))
     }
-    fn audit_baseline(&self) -> Result<()> {
-        // Per-package markers also distinguish packages imported into an existing empty grain.
-        let untracked: Vec<_> = self
-            .package_ids()?
-            .into_iter()
-            .filter(|id| {
-                !self
-                    .root
-                    .join("packages")
-                    .join(id)
-                    .join("audit-tracked")
-                    .exists()
-            })
-            .collect();
-        if untracked.is_empty() {
-            return Ok(());
-        }
-        let public = self.public_states()?;
-        let deprecations = self.deprecations()?;
-        for id in untracked {
-            let marker = self.package_dir(&id)?.join("audit-tracked");
-            let visibility = public.get(&id).copied().unwrap_or_default();
-            let mut event = self.package_event(&id, "baseline", json!(null))?;
-            event.details = json!({
-                "note": "Existing release when audit tracking began; historical actors and dates are unknown.",
-                "state": audit_status(self.status(&id)?.get_root()?)?,
-                "publicVisibility": visibility,
-                "rollbackSelection": self.release_pin(&event.app_id)?,
-                "deprecation": deprecations.get(&event.app_id)
-            });
-            self.audit_commit(
-                Transaction {
-                    writes: vec![
-                        (marker, Vec::new()),
-                        (
-                            self.package_dir(&id)?.join("audit-public.json"),
-                            serde_json::to_vec(&visibility)?,
-                        ),
-                    ],
-                    ..Default::default()
-                },
-                vec![event],
-            )?;
-        }
-        Ok(())
-    }
-    fn public_states(&self) -> Result<BTreeMap<String, PublicVisibility>> {
-        // During an interrupted fallback swap the saved previous generation is
-        // still the committed publication; the publisher will restore it.
-        let mut www = self.root.join("www");
+    fn installed_directory(&self) -> PathBuf {
+        let www = self.root.join("www");
         if !www.exists() && self.root.join("www.publish-previous").exists() {
-            www = self.root.join("www.publish-previous");
+            self.root.join("www.publish-previous")
+        } else {
+            www
         }
+    }
+    fn public_states(&self, www: &Path) -> Result<BTreeMap<String, PublicVisibility>> {
         let mut states = BTreeMap::new();
         for id in self.package_ids()? {
             let visibility = PublicVisibility {
@@ -1003,6 +897,9 @@ impl Registry {
             if path.exists() {
                 let index: AppIndexForMarket = serde_json::from_slice(&fs::read(path)?)?;
                 for app in index.apps {
+                    if app.deprecation.is_some() {
+                        continue;
+                    }
                     if let Some(visibility) = states.get_mut(&app.package_id) {
                         if experimental {
                             visibility.experimental_listing = true;
@@ -1015,50 +912,70 @@ impl Registry {
         }
         Ok(states)
     }
+    fn prepare_publication(&self, catalog: &Path) -> Result<i64> {
+        let items = self.public_states(catalog)?;
+        self.database.transaction(|db| {
+            db.execute("UPDATE publication_generations SET status='failed' WHERE status='prepared'", [])?;
+            db.execute("INSERT INTO publication_generations(source_revision,status,created_at) SELECT state_revision,'prepared',? FROM registry_state", [chrono::Utc::now().to_rfc3339()])?;
+            let generation = db.last_insert_rowid();
+            for (id,visibility) in items {
+                db.execute("INSERT INTO publication_items VALUES(?,?,?)", rusqlite::params![generation,id,serde_json::to_string(&visibility)?])?;
+            }
+            db.execute("INSERT INTO publication_causes
+                SELECT ?,a.app_id,e.event_number FROM apps a JOIN audit_events e
+                ON e.app_id=a.app_id AND e.event_number=(SELECT event_number FROM audit_events
+                    WHERE app_id=a.app_id AND action NOT IN ('publicationChanged','submitted','resubmitted')
+                    ORDER BY event_number DESC LIMIT 1)", [generation])?;
+            // Retain generation summaries and audit records, only current/pending
+            // generations need their full package and cause snapshots.
+            db.execute("DELETE FROM publication_items WHERE generation_id != ? AND generation_id != COALESCE((SELECT installed_generation_id FROM registry_state),0)", [generation])?;
+            db.execute("DELETE FROM publication_causes WHERE generation_id != ? AND generation_id != COALESCE((SELECT installed_generation_id FROM registry_state),0)", [generation])?;
+            Ok(generation)
+        })
+    }
     fn audit_publication(&self) -> Result<()> {
-        // Compare installed output, never desired approval state. Reconcile before
-        // a new decision too, preserving the original cause after a failed response.
-        for (id, next) in self.public_states()? {
-            let path = self.package_dir(&id)?.join("audit-public.json");
-            let previous = if path.exists() {
-                serde_json::from_slice(&fs::read(&path)?)?
-            } else {
-                PublicVisibility::default()
-            };
+        let www = self.installed_directory();
+        if !www.exists() {
+            return Ok(());
+        }
+        let generation = fs::read_to_string(www.join("generation.txt"))?
+            .parse::<i64>()
+            .context("invalid installed generation")?;
+        let observed = self.public_states(&www)?;
+        let mut changes = Vec::new();
+        let mut events = Vec::new();
+        for (id, next) in observed {
+            let previous = self.database.visibility(&id)?;
             if previous == next {
                 continue;
             }
             let mut event = self.package_event(&id, "publicationChanged", json!(null))?;
-            let cause_path = self
-                .root
-                .join("audit")
-                .join(&event.app_id)
-                .join("cause.json");
-            let cause = if cause_path.exists() {
-                Some(serde_json::from_slice::<Event>(&fs::read(cause_path)?)?)
-            } else {
-                None
-            };
+            let cause = self.database.publication_cause(generation, &event.app_id)?;
             event.actor = Actor::default();
             event.details = json!({"previous": previous, "next": next,
+                "generation": generation,
                 "latestDecision": cause.as_ref().map(|event| event.number),
                 "decisionActor": cause.as_ref().map(|event| &event.actor),
-                "note": "Visibility observed after publication or during recovery; timestamp is the observation time. Linked decision is the most recent app decision, not proof of sole causation."});
-            self.audit_commit(
-                Transaction {
-                    writes: vec![(path, serde_json::to_vec(&next)?)],
-                    ..Default::default()
-                },
-                vec![event],
-            )?;
+                "note": "Visibility observed after publication or during recovery; timestamp is the observation time. Linked decision is publication context, not proof of sole causation."});
+            changes.push(Change::Visibility(id, next));
+            events.push(event);
         }
-        Ok(())
+        self.database.transaction(|db| {
+            for change in changes {
+                crate::database::apply(db, change)?;
+            }
+            crate::database::append_events(db, events)?;
+            ensure!(db.execute("UPDATE publication_generations SET status='installed',installed_at=COALESCE(installed_at,?),last_error=NULL WHERE generation_id=?", rusqlite::params![chrono::Utc::now().to_rfc3339(),generation])? == 1,"unknown installed generation");
+            db.execute("UPDATE publication_generations SET status='superseded' WHERE status='installed' AND generation_id != ?",[generation])?;
+            db.execute("UPDATE registry_state SET installed_generation_id=?",[generation])?;
+            Ok(())
+        })
     }
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PublicVisibility {
-    approved_listing: bool,
-    experimental_listing: bool,
-    download: bool,
+pub(crate) struct PublicVisibility {
+    pub(crate) approved_listing: bool,
+    pub(crate) experimental_listing: bool,
+    pub(crate) download: bool,
 }

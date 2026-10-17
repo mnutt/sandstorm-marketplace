@@ -31,7 +31,7 @@ fn registry_lifecycle_and_restart() -> anyhow::Result<()> {
     assert!(page.exists());
     assert_eq!(std::fs::read(&download)?, package(1));
     assert!(std::fs::read_to_string(&page)?.contains("Rust test app"));
-    // Real legacy status/metadata messages survive restart.
+    // Stored submission state and metadata survive restart.
     let reopened = Registry::new(dir.path().to_owned())?;
     reopened.publish()?;
     assert!(page.exists());
@@ -293,7 +293,7 @@ async fn process_entry_point(recovery: bool) -> anyhow::Result<()> {
             let broken = if recovery {
                 let registry = Registry::new(dir.path().to_owned())?;
                 registry.publish()?;
-                Some(seed_legacy_invalid(&registry, 99)?)
+                Some(seed_invalid_metadata(&registry, 99)?)
             } else {
                 None
             };
@@ -637,7 +637,7 @@ async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow
             let submitter = session(&view, &[false, false, true], true).await?;
             for (client, path) in [
                 (&submitter, format!("download/{id}")),
-                (&reviewer, "download/../../keybase-token".to_owned()),
+                (&reviewer, "download/../../marketplace.sqlite".to_owned()),
                 (&reviewer, format!("download/{}", "0".repeat(32))),
             ] {
                 let mut get = client.get_request();
@@ -693,7 +693,7 @@ async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow
 }
 
 #[test]
-fn invalid_metadata_is_rejected_before_commit_and_legacy_entries_remain_reviewable()
+fn invalid_metadata_is_rejected_before_commit_and_stored_entries_remain_reviewable()
 -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let registry = Registry::new(dir.path().to_owned())?;
@@ -707,7 +707,7 @@ fn invalid_metadata_is_rejected_before_commit_and_legacy_entries_remain_reviewab
             .contains("invalid marketplace metadata")
     );
     assert!(registry.package_ids()?.is_empty());
-    let bad = seed_legacy_invalid(&registry, 1)?;
+    let bad = seed_invalid_metadata(&registry, 1)?;
     let queue = serde_json::to_value(registry.queue()?)?;
     assert!(
         queue[0]["validationError"]
@@ -1022,32 +1022,8 @@ fn audit_tracks_actors_retries_failed_publication_and_recovery() -> anyhow::Resu
 }
 
 #[test]
-fn audit_baselines_and_imports_do_not_invent_historical_actors() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let registry = Registry::new(dir.path().to_owned())?;
-    let first = upload(&registry, 1);
-    let second = upload(&registry, 2);
-    // Model a pre-audit installation with two releases of the same app.
-    std::fs::remove_dir_all(dir.path().join("audit"))?;
-    for id in [&first, &second] {
-        std::fs::remove_file(registry.package_dir(id)?.join("audit-tracked"))?;
-    }
-    let registry = Registry::new(dir.path().to_owned())?;
+fn audit_imports_do_not_invent_historical_actors() -> anyhow::Result<()> {
     let app = ids::app_id(key().verifying_key().as_bytes());
-    let events = registry.audit_page(&app, None)?.events;
-    assert_eq!(events.len(), 2);
-    assert!(
-        events
-            .iter()
-            .all(|e| e.action == "baseline" && e.actor.kind == "system")
-    );
-    assert_eq!(
-        Registry::new(dir.path().to_owned())?
-            .audit_page(&app, None)?
-            .events
-            .len(),
-        2
-    );
     let imported = tempfile::tempdir()?;
     let registry = Registry::new(imported.path().to_owned())?;
     let mut file = registry.temporary()?;
@@ -1056,11 +1032,7 @@ fn audit_baselines_and_imports_do_not_invent_historical_actors() -> anyhow::Resu
     let events = registry.audit_page(&app, None)?.events;
     assert!(events.iter().any(|e| e.action == "imported"));
     assert!(events.iter().any(|e| e.action == "publicationChanged"));
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.action == "approved" || e.action == "baseline")
-    );
+    assert!(!events.iter().any(|e| e.action == "approved"));
     Ok(())
 }
 
@@ -1144,21 +1116,12 @@ fn audit_recovers_visibility_installed_before_history_was_written() -> anyhow::R
     std::fs::remove_dir_all(dir.path().join("catalog"))?;
     std::fs::write(dir.path().join("catalog"), "blocked")?;
     assert!(registry.review(&id, "approve", "").is_err());
-    let audit_dir = dir.path().join("audit").join(&app);
-    let saved: Vec<_> = std::fs::read_dir(&audit_dir)?
-        .map(|entry| {
-            let path = entry.unwrap().path();
-            let bytes = std::fs::read(&path).unwrap();
-            (path, bytes)
-        })
-        .collect();
+    let db = rusqlite::Connection::open(dir.path().join("marketplace.sqlite"))?;
+    db.execute_batch("CREATE TRIGGER interrupt_visibility BEFORE UPDATE OF public_visibility ON releases BEGIN SELECT RAISE(FAIL,'simulated crash after site swap'); END;")?;
     std::fs::remove_file(dir.path().join("catalog"))?;
-    registry.publish()?;
-    // Model a crash after the site swap but before the visibility transaction.
-    for (path, bytes) in saved {
-        std::fs::write(path, bytes)?;
-    }
-    std::fs::remove_file(registry.package_dir(&id)?.join("audit-public.json"))?;
+    assert!(registry.publish().is_err());
+    assert!(dir.path().join("www/packages").join(&id).is_file());
+    db.execute_batch("DROP TRIGGER interrupt_visibility;")?;
     let recovered = Registry::new(dir.path().to_owned())?;
     // A later decision first reconciles the installed generation, then records itself.
     recovered.review(&id, "reject", "Revoke after recovery")?;
@@ -1184,25 +1147,26 @@ fn audit_recovers_visibility_installed_before_history_was_written() -> anyhow::R
 }
 
 #[test]
-fn audit_import_failure_does_not_leave_an_unrecoverable_transaction() -> anyhow::Result<()> {
+fn import_retries_ignore_unreferenced_files() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let registry = Registry::new(dir.path().to_owned())?;
     std::fs::create_dir(dir.path().join("packages/incomplete"))?;
     let mut file = registry.temporary()?;
     file.write_all(&import_bundle(false)?)?;
-    assert!(registry.import_catalog(file.path()).is_err());
-    assert!(!dir.path().join("audit-transaction.json").exists());
-    Registry::new(dir.path().to_owned())?;
+    registry.import_catalog(file.path())?;
+    assert!(
+        !Registry::new(dir.path().to_owned())?
+            .package_ids()?
+            .is_empty()
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn audit_new_submission_after_legacy_migration_is_not_a_baseline() -> anyhow::Result<()> {
+async fn audit_new_submission_after_restart_records_the_submitter() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let old = Registry::new(temp.path().to_owned())?;
     let previous = upload(&old, 331);
-    std::fs::remove_dir_all(temp.path().join("audit"))?;
-    std::fs::remove_file(old.package_dir(&previous)?.join("audit-tracked"))?;
     drop(old);
     let registry = Registry::new(temp.path().to_owned())?;
     let app = ids::app_id(key().verifying_key().as_bytes());
@@ -1246,7 +1210,7 @@ async fn audit_new_submission_after_legacy_migration_is_not_a_baseline() -> anyh
     assert_eq!(events[1].action, "submitted");
     assert_eq!(events[1].version, Some(332));
     assert_eq!(events[1].actor.kind, "unidentifiedSession");
-    assert_eq!(events[2].action, "baseline");
+    assert_eq!(events[2].action, "submitted");
     assert_eq!(events[2].version, Some(331));
     Ok(())
 }
@@ -1268,8 +1232,11 @@ fn audit_resubmissions_record_fresh_intent_but_not_status_checks_or_retries() ->
     author.submission(&request(&id, Some(s::SubmissionState::Publish), 1))?;
     registry.review(&id, "approve", "")?;
     let before = registry.audit_page(&app, None)?.events.len();
-    let cause_path = temp.path().join("audit").join(&app).join("cause.json");
-    let cause = std::fs::read(&cause_path)?;
+    let db = rusqlite::Connection::open(temp.path().join("marketplace.sqlite"))?;
+    let cause = || -> anyhow::Result<i64> {
+        Ok(db.query_row("SELECT max(event_number) FROM audit_events WHERE app_id=? AND action NOT IN ('publicationChanged','submitted','resubmitted')", [&app], |r| r.get(0))?)
+    };
+    let original_cause = cause()?;
     let resubmit = request(&id, Some(s::SubmissionState::Publish), 2);
     author.submission(&resubmit)?;
     let events = registry.audit_page(&app, None)?.events;
@@ -1288,7 +1255,7 @@ fn audit_resubmissions_record_fresh_intent_but_not_status_checks_or_retries() ->
     assert_eq!(events[0].details["next"]["review"], "approved");
     assert_eq!(events[0].details["sequenceNumber"], "2");
     // A no-op must not displace the decision associated with public visibility.
-    assert_eq!(std::fs::read(&cause_path)?, cause);
+    assert_eq!(cause()?, original_cause);
     let reopened = Registry::new(temp.path().to_owned())?;
     reopened.submission(&resubmit)?;
     reopened.submission(&request(&id, None, 0))?;

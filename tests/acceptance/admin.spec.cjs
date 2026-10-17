@@ -123,8 +123,8 @@ test('refresh failure after a saved decision is visible on the page', async ({ p
   await expect(page.locator('#message')).not.toBeVisible();
   expect(await publicVersion(request)).toBe(3);
 });
-test('legacy malformed packages can be rejected through the admin UI', async ({ page, request }) => {
-  const badId = await (await request.post('/__test/legacy-invalid')).text();
+test('malformed stored metadata can be rejected through the admin UI', async ({ page, request }) => {
+  const badId = await (await request.post('/__test/invalid-metadata')).text();
   const row = (await queue(request)).find(row => row.app.packageId === badId);
   expect(row.validationError).toContain('utf-8');
   await page.goto(`/admin/#app/${row.app.appId}`);
@@ -253,7 +253,7 @@ test('private activity history records approvers, publication, and paginates saf
   await expect(history).toContainText('Package submitted');
   await expect(history).toContainText('Public visibility changed');
   expect((await request.get(`/submitter/audit/${item.app.appId}`)).ok()).toBeFalsy();
-  expect((await request.get(`/public/audit/${item.app.appId}/head.json`)).status()).toBe(404);
+  expect((await request.get(`/public/marketplace.sqlite`)).status()).toBe(404);
   // Text is rendered as text, including rejection reasons that resemble HTML.
   await request.post(`/admin/reject/${item.app.packageId}`, { data: '<img src=x onerror=alert(1)> fix this' });
   await history.getByRole('button', { name: 'Refresh', exact: true }).click();

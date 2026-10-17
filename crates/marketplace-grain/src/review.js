@@ -55,7 +55,7 @@ function canRollback(item, versions) {
 const auditEventLabels = {
   submitted: "Package submitted", imported: "Package imported",
   resubmitted: "Resubmitted — no state change",
-  baseline: "Existing release recorded", approved: "Approved",
+  approved: "Approved",
   rejected: "Rejected / update requested", approvalRevoked: "Approval revoked",
   authorStateChanged: "Author request changed", rolledBack: "Rollback selected",
   rollbackCleared: "Rollback cleared", deprecated: "App deprecated",

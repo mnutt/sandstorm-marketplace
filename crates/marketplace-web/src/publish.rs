@@ -23,6 +23,21 @@ pub(crate) fn publish_with_package_base(
     output: &Path,
     package_base: Option<&str>,
 ) -> Result<()> {
+    publish_generation_inner(source, output, package_base, None)
+}
+
+/// Include only a public generation number, atomically installed with the site.
+pub fn publish_generation(source: &Path, output: &Path, generation: i64) -> Result<()> {
+    ensure!(generation > 0, "invalid publication generation");
+    publish_generation_inner(source, output, None, Some(generation))
+}
+
+fn publish_generation_inner(
+    source: &Path,
+    output: &Path,
+    package_base: Option<&str>,
+    generation: Option<i64>,
+) -> Result<()> {
     let source = source.canonicalize()?;
     let parent = output
         .parent()
@@ -66,7 +81,12 @@ pub(crate) fn publish_with_package_base(
         fs::remove_dir_all(&stage)?;
     }
     fs::create_dir(&stage)?;
-    let result = build(&source, &stage, package_base).and_then(|()| commit(&stage, &output));
+    let result = build(&source, &stage, package_base).and_then(|()| {
+        if let Some(generation) = generation {
+            write(&stage.join("generation.txt"), generation.to_string())?;
+        }
+        commit(&stage, &output)
+    });
     if stage.exists() {
         fs::remove_dir_all(&stage)?;
     }

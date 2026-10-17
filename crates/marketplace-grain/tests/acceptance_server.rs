@@ -210,8 +210,8 @@ impl Fixture {
                     self.fail_queue = true;
                     return Ok(response(204, "text/plain", vec![], None));
                 }
-                "/__test/legacy-invalid" => {
-                    let id = common::seed_legacy_invalid(&self.registry, 99)?;
+                "/__test/invalid-metadata" => {
+                    let id = common::seed_invalid_metadata(&self.registry, 99)?;
                     return Ok(response(200, "text/plain", id.into_bytes(), None));
                 }
                 _ => {}

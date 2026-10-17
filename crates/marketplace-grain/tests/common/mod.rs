@@ -185,8 +185,8 @@ pub async fn post(
     call.send().promise.await
 }
 
-/// Simulate a malformed signed package persisted by an older build.
-pub fn seed_legacy_invalid(registry: &Registry, version: u32) -> anyhow::Result<String> {
+/// Inject malformed stored metadata to exercise administrative recovery.
+pub fn seed_invalid_metadata(registry: &Registry, version: u32) -> anyhow::Result<String> {
     let bytes = package_with_description(version, true);
     let mut file = registry.temporary()?;
     file.write_all(&bytes)?;
@@ -195,13 +195,12 @@ pub fn seed_legacy_invalid(registry: &Registry, version: u32) -> anyhow::Result<
     let id = hex::encode(ids::package_bytes(info.get_package_id()?));
     let dir = registry.package_dir(&id)?;
     std::fs::create_dir(&dir)?;
-    marketplace_grain::registry::write_message(&dir.join("metadata"), &metadata)?;
-    let mut status = Builder::new_default();
-    status
-        .init_root::<s::submission_status::Builder>()
-        .set_request_state(s::SubmissionState::Publish);
-    marketplace_grain::registry::write_message(&dir.join("status"), &status)?;
     std::fs::write(dir.join("spk"), bytes)?;
-    std::fs::write(dir.join("ever-approved"), b"")?;
+    let mut metadata_bytes = Vec::new();
+    serialize::write_message(&mut metadata_bytes, &metadata)?;
+    let db = rusqlite::Connection::open(registry.root.join("marketplace.sqlite"))?;
+    let app = ids::app_id(&ids::app_bytes(info.get_app_id()?));
+    db.execute("INSERT OR IGNORE INTO apps(app_id) VALUES(?)", [&app])?;
+    db.execute("INSERT INTO releases(package_id,app_id,build_number,verified_metadata,request_state,review_state,review_reason,first_published_at,ever_approved,next_sequence_number) VALUES(?,?,?,?,?,'pending','',0,1,zeroblob(8))",rusqlite::params![id,app,version,metadata_bytes,u16::from(s::SubmissionState::Publish)])?;
     Ok(id)
 }

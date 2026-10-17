@@ -1,9 +1,5 @@
 //! Empty-grain bootstrap from a public catalog. Never extracts arbitrary tar paths.
-use crate::{
-    ids, package_capnp as p,
-    registry::{Registry, atomic_write},
-    spk, submit_capnp as s,
-};
+use crate::{ids, package_capnp as p, registry::Registry, spk, submit_capnp as s};
 use anyhow::{Context, Result, ensure};
 use marketplace_model::app_index::AppIndexForMarket;
 use std::{
@@ -24,7 +20,6 @@ impl Registry {
         path: &Path,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
-        self.recover_audit()?;
         let started = std::time::Instant::now();
         tracing::info!(bytes = fs::metadata(path)?.len(), "Starting catalog import");
         ensure!(
@@ -126,9 +121,12 @@ impl Registry {
                     "SPK identity/version does not match catalog"
                 );
                 if let Some(author) = app.author {
-                    atomic_write(
-                        &staged.package_dir(&id)?.join("catalog-author.json"),
-                        &serde_json::to_vec(&author)?,
+                    staged.database.commit(
+                        vec![crate::database::Change::ImportedAuthor(
+                            id.clone(),
+                            serde_json::to_string(&author)?,
+                        )],
+                        Vec::new(),
                     )?;
                 }
                 states.push((id, is_approved));
@@ -155,10 +153,9 @@ impl Registry {
         staged.publish()?;
         crate::work::check_cancelled(cancelled)?;
         ensure!(self.package_ids()?.is_empty(), "grain is no longer empty");
-        // POSIX rename atomically replaces the empty destination directory. A nonempty
-        // destination (including an incomplete upload) fails without replacing it.
         tracing::info!(packages = listed.len(), "Committing imported packages");
         let mut events = Vec::new();
+        let mut changes = Vec::new();
         for id in staged.package_ids()? {
             let mut event = staged.package_event(&id, "imported", serde_json::json!({
                 "note": "Imported catalog state; upstream reviewers and historical dates are unknown.",
@@ -166,27 +163,36 @@ impl Registry {
             }))?;
             event.actor = self.actor.clone();
             events.push(event);
-            // The staged preview was never publicly installed in this grain.
-            let visibility = staged.package_dir(&id)?.join("audit-public.json");
-            if visibility.exists() {
-                fs::remove_file(visibility)?;
-                File::open(staged.package_dir(&id)?)?.sync_all()?;
+            let (metadata,received_at,ever_approved) = staged.database.read(|db| Ok(db.query_row("SELECT verified_metadata,received_at,ever_approved FROM releases WHERE package_id=?", [&id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?))?;
+            let mut status = capnp::message::Builder::new_default();
+            status.set_root(
+                staged
+                    .status(&id)?
+                    .get_root::<s::submission_status::Reader>()?,
+            )?;
+            changes.push(crate::database::Change::Release {
+                id: id.clone(),
+                metadata,
+                status: crate::database::encode(&status)?,
+                received_at,
+                ever_approved,
+            });
+            if let Some(profile) = staged.database.imported_author(&id)? {
+                changes.push(crate::database::Change::ImportedAuthor(id.clone(), profile));
             }
+            // Files precede their metadata commit. Interrupted imports leave only
+            // unreferenced immutable SPKs and can be retried safely.
+            let destination = self.package_dir(&id)?;
+            fs::create_dir_all(&destination)?;
+            fs::rename(
+                staged.package_dir(&id)?.join("spk"),
+                destination.join("spk"),
+            )?;
+            File::open(destination)?.sync_all()?;
         }
-        ensure!(
-            fs::read_dir(self.root.join("packages"))?.next().is_none(),
-            "import destination contains incomplete package data"
-        );
-        // Keep staged data alive until the redo journal has committed its rename.
-        let work_path = work.keep();
-        self.audit_commit(
-            crate::audit::Transaction {
-                moves: vec![(staged.root.join("packages"), self.root.join("packages"))],
-                cleanup: vec![work_path],
-                ..Default::default()
-            },
-            events,
-        )?;
+        File::open(self.root.join("packages"))?.sync_all()?;
+        crate::work::check_cancelled(cancelled)?;
+        self.audit_commit(changes, events)?;
         self.publish()?;
         tracing::info!(
             packages = listed.len(),
