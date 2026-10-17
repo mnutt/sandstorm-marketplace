@@ -24,6 +24,7 @@ impl Registry {
         path: &Path,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
+        self.recover_audit()?;
         let started = std::time::Instant::now();
         tracing::info!(bytes = fs::metadata(path)?.len(), "Starting catalog import");
         ensure!(
@@ -157,7 +158,35 @@ impl Registry {
         // POSIX rename atomically replaces the empty destination directory. A nonempty
         // destination (including an incomplete upload) fails without replacing it.
         tracing::info!(packages = listed.len(), "Committing imported packages");
-        fs::rename(staged.root.join("packages"), self.root.join("packages"))?;
+        let mut events = Vec::new();
+        for id in staged.package_ids()? {
+            let mut event = staged.package_event(&id, "imported", serde_json::json!({
+                "note": "Imported catalog state; upstream reviewers and historical dates are unknown.",
+                "state": crate::registry::audit_status(staged.status(&id)?.get_root()?)?
+            }))?;
+            event.actor = self.actor.clone();
+            events.push(event);
+            // The staged preview was never publicly installed in this grain.
+            let visibility = staged.package_dir(&id)?.join("audit-public.json");
+            if visibility.exists() {
+                fs::remove_file(visibility)?;
+                File::open(staged.package_dir(&id)?)?.sync_all()?;
+            }
+        }
+        ensure!(
+            fs::read_dir(self.root.join("packages"))?.next().is_none(),
+            "import destination contains incomplete package data"
+        );
+        // Keep staged data alive until the redo journal has committed its rename.
+        let work_path = work.keep();
+        self.audit_commit(
+            crate::audit::Transaction {
+                moves: vec![(staged.root.join("packages"), self.root.join("packages"))],
+                cleanup: vec![work_path],
+                ..Default::default()
+            },
+            events,
+        )?;
         self.publish()?;
         tracing::info!(
             packages = listed.len(),

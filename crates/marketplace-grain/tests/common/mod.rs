@@ -145,6 +145,14 @@ pub async fn session(
     bits: &[bool],
     api: bool,
 ) -> capnp::Result<web::Client> {
+    session_with_identity(view, bits, api, None).await
+}
+pub async fn session_with_identity(
+    view: &ui_view::Client,
+    bits: &[bool],
+    api: bool,
+    identity: Option<(&[u8], &str)>,
+) -> capnp::Result<web::Client> {
     let mut open = view.new_session_request();
     open.get().set_session_type(if api {
         api_session::Client::TYPE_ID
@@ -157,6 +165,11 @@ pub async fn session(
         .init_permissions(bits.len() as u32);
     for (i, &bit) in bits.iter().enumerate() {
         permissions.set(i as u32, bit);
+    }
+    if let Some((id, name)) = identity {
+        let mut user = open.get().get_user_info()?;
+        user.set_identity_id(id);
+        user.init_display_name().set_default_text(name);
     }
     open.get().set_context(capnp_rpc::new_client(Context));
     Ok(cast(open.send().promise.await?.get()?.get_session()?))

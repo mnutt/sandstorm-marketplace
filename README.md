@@ -466,3 +466,54 @@ Use **Restore app to indexes** to undo deprecation. This policy is app-level and
 survives new releases and restarts. `/var/deprecations.json` is authoritative and
 included in Sandstorm grain backups. A public catalog sync/import only includes
 listed apps; it is not a full grain backup and does not preserve deprecated apps.
+
+### Private audit history
+
+Each app's administration page includes **Activity history**, available to reviewers
+and approvers. It records package submissions and imports, author requests for
+review/publication or withdrawal, approvals, rejections, approval revocations,
+rollback selections, and deprecation/restoration. Separate visibility events show
+when a release's public download or approved/experimental listing changes.
+Approval remains recorded when publication fails; a successful retry records the
+resulting visibility change without duplicating the decision. Unchanged rebuilds,
+status queries, and identical retries do not add events. A fresh signed author
+request with a newer sequence number records **Resubmitted — no state change**
+when it repeats the existing submission state. This records the author and request
+without changing review status or adding another publication event.
+
+Admin events retain the Sandstorm identity ID and display name supplied at session
+creation. Signed author requests always show **Signing key** in the Actor column,
+with the verified key in Details. Submission events omit any webkey-associated
+user from both the Actor column and displayed details; that identity does not
+establish who used the key. Raw upload events show **Submission API**, since the
+package signature alone does not identify its uploader. Stored session metadata
+is retained in the private audit records. Admin actions continue to show the
+acting user's identity.
+Publication events identify the marketplace system and reference the most recent
+app decision and its actor. This reference provides context, not proof that one
+decision was the sole cause when several changes preceded publication. Recovery
+observations use their observation time rather than inventing a publication time.
+
+History is private under `/var/audit/<appId>/`: numbered JSON chunks contain at
+most **100 events**, with a small `head.json` recording the latest event number.
+The UI fetches **50 events** at a time through `audit/<appId>[/<before-event-number>]`.
+A page reads at most two chunks, without scanning older history; stable cursors
+exclude newer arrivals from older pages. Loaded pages survive automatic admin
+refreshes; **Refresh** explicitly reloads the newest page. Events are
+limited to 32 KiB, and new rejection reasons to 8 KiB of JSON-encoded text.
+Oversized legacy reasons use an explicitly marked excerpt plus a SHA-256 digest.
+Completed chunks are immutable during normal operation; only the current chunk
+and small metadata files change on append. There is no automatic history deletion.
+
+A temporary `/var/audit-transaction.json` redo journal makes state changes and
+history recoverable together, including staged package moves. It is removed after
+commit and does not accumulate history. Publication visibility checkpoints live
+beside each private package. Startup and later operations recover interrupted
+transactions; publication reconciles the installed public output with those
+checkpoints. Existing packages receive baseline events with their observed state,
+not fabricated historical decisions. Imports record the importing session and
+catalog state, without claiming to know upstream reviewers.
+
+Audit files are included in Sandstorm grain backups, never in the generated public
+site or public catalog export. This is an application history, not a tamper-proof
+ledger against someone who can modify grain storage or restore an older backup.

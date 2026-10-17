@@ -59,7 +59,9 @@ impl ui_view::Server for View {
                 "session permission denied"
             );
             let session = Session {
-                registry: self.registry.clone(),
+                registry: self
+                    .registry
+                    .with_actor(crate::audit::Actor::session(params.get_user_info()?, api)?),
                 api,
                 can_approve: has(0),
                 context: cast(params.get_context()?),
@@ -110,6 +112,13 @@ impl web::Server for Session {
                             busy: registry.is_busy(),
                         };
                         content(results.get(), "application/json", &serde_json::to_vec(&snapshot)?);
+                    }
+                    path if path.starts_with("audit/") => {
+                        let parts: Vec<_> = path[6..].split('/').collect();
+                        ensure!(parts.len() <= 2, "invalid audit cursor");
+                        let before = parts.get(1).map(|value| value.parse::<u64>()).transpose()?;
+                        let page = registry.audit_page(parts[0], before)?;
+                        content(results.get(), "application/json", &serde_json::to_vec(&page)?);
                     }
                     "review.css" => content(results.get(), "text/css; charset=utf-8", include_bytes!("review.css")),
                     path if path.starts_with("assets/") => {

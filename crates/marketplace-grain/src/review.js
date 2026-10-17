@@ -52,6 +52,41 @@ function canRollback(item, versions) {
     item.app.versionNumber < current.app.versionNumber
   );
 }
+const auditEventLabels = {
+  submitted: "Package submitted", imported: "Package imported",
+  resubmitted: "Resubmitted — no state change",
+  baseline: "Existing release recorded", approved: "Approved",
+  rejected: "Rejected / update requested", approvalRevoked: "Approval revoked",
+  authorStateChanged: "Author request changed", rolledBack: "Rollback selected",
+  rollbackCleared: "Rollback cleared", deprecated: "App deprecated",
+  restored: "App restored", publicationChanged: "Public visibility changed",
+};
+function auditActorForDisplay(actor, action) {
+  if (actor.signingKey) return { kind: "appSigningKey", signingKey: actor.signingKey };
+  if (action === "submitted") return { kind: "submissionApi", displayName: "Submission API" };
+  return actor;
+}
+function auditActorName(actor) {
+  if (actor.signingKey) return "Signing key";
+  if (actor.identityId) return actor.displayName?.trim() || `Sandstorm user ${actor.identityId}`;
+  return actor.displayName || "User not identified";
+}
+function auditEventForDisplay(event) {
+  const details = { ...event.details };
+  if (details.decisionActor) details.decisionActor = auditActorForDisplay(details.decisionActor);
+  return { ...event, actor: auditActorForDisplay(event.actor, event.action), details };
+}
+function auditEventLabel(event) {
+  if (event.action === "authorStateChanged") {
+    const requestedState = {
+      publish: "Author requested publication",
+      review: "Author requested review / embargo",
+      ignore: "Author withdrew release",
+    }[event.details.next?.requestState];
+    if (requestedState) return requestedState;
+  }
+  return auditEventLabels[event.action] || event.action;
+}
 if (typeof module !== "undefined")
   module.exports = {
     awaitingReview,
@@ -62,6 +97,10 @@ if (typeof module !== "undefined")
     lastPublished,
     publishedApps,
     releaseCount,
+    auditActorName,
+    auditActorForDisplay,
+    auditEventForDisplay,
+    auditEventLabel,
   };
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -73,6 +112,7 @@ if (typeof document !== "undefined") {
     refreshing = false,
     decision = null;
   const pageSize = 25;
+  let auditView = null;
 
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -403,7 +443,93 @@ if (typeof document !== "undefined") {
       ),
     );
     for (const entry of versions) history.append(release(entry, versions));
-    detail.append(info, history);
+    detail.append(info, activityHistory(appId), history);
+  }
+  function renderAuditEvent(rawEvent) {
+    const event = auditEventForDisplay(rawEvent);
+    const row = element("tr");
+    const description = element("td");
+    const { actor, details } = event;
+    const dateCell = element("td", undefined, "meta");
+    const dateButton = button(date(event.timestamp), () => {
+      $("audit-details-title").textContent = `Event #${event.number} details`;
+      $("audit-details-json").textContent = JSON.stringify(event, null, 2);
+      $("audit-details").showModal();
+    }, "audit-date");
+    dateButton.setAttribute("aria-haspopup", "dialog");
+    dateButton.title = `View event #${event.number} details`;
+    dateCell.append(dateButton);
+    row.append(dateCell,
+      element("td", auditEventLabel(event)), element("td", auditActorName(actor), "meta"),
+      element("td", event.version == null ? "—" : String(event.version)), description);
+    if (event.action === "publicationChanged") {
+      const previous = details.previous;
+      const next = details.next;
+      const changes = [];
+      if (previous.download !== next.download) changes.push(next.download ? "SPK download published" : "SPK download removed");
+      if (previous.approvedListing !== next.approvedListing) changes.push(next.approvedListing ? "Listed in approved catalog" : "Removed from approved catalog");
+      if (previous.experimentalListing !== next.experimentalListing) changes.push(next.experimentalListing ? "Listed in experimental catalog" : "Removed from experimental catalog");
+      description.append(element("p", changes.join(" · ")));
+      if (details.decisionActor) description.append(element("p", `Latest decision: #${details.latestDecision} by ${auditActorName(details.decisionActor)}`, "meta"));
+    }
+    if (event.action === "rejected") description.append(element("p", details.next.reason));
+    if (details.note && event.action !== "publicationChanged") description.append(element("p", details.note));
+    return row;
+  }
+  function activityHistory(appId) {
+    if (auditView?.appId === appId) return auditView.section;
+    const section = element("section", undefined, "card audit-history");
+    const toolbar = element("div", undefined, "toolbar");
+    toolbar.append(element("h2", "Activity history"));
+    const tableWrap = element("div", undefined, "table-wrap");
+    const table = element("table");
+    table.setAttribute("aria-label", "Activity history");
+    const head = element("thead");
+    const headings = element("tr");
+    for (const label of ["Date", "Event", "Actor", "Build", "Details"]) {
+      const heading = element("th", label);
+      heading.scope = "col";
+      headings.append(heading);
+    }
+    head.append(headings);
+    const list = element("tbody");
+    table.append(head, list);
+    tableWrap.append(table);
+    const status = element("p", "Loading activity…", "meta");
+    status.setAttribute("role", "status");
+    let before;
+    const more = button("Load older events", () => load());
+    more.hidden = true;
+    async function load() {
+      more.disabled = true;
+      reload.disabled = true;
+      status.hidden = false;
+      status.textContent = "Loading activity…";
+      try {
+        const result = await json(`audit/${encodeURIComponent(appId)}${before === undefined ? "" : `/${before}`}`);
+        // Render before changing the table, so a failed page cannot leave partial rows.
+        list.append(...result.events.map(renderAuditEvent));
+        before = result.before;
+        more.hidden = before == null;
+        status.textContent = list.children.length ? "" : "No activity recorded yet.";
+        status.hidden = list.children.length > 0;
+        more.textContent = "Load older events";
+      } catch (error) {
+        status.textContent = `Could not load activity: ${error.message}`;
+        more.hidden = false;
+        more.textContent = "Retry loading activity";
+      } finally { more.disabled = false; reload.disabled = false; }
+    }
+    const reload = button("Refresh", () => {
+      before = undefined;
+      list.replaceChildren();
+      load();
+    });
+    toolbar.append(reload);
+    section.append(toolbar, status, tableWrap, more);
+    auditView = { appId, section };
+    load();
+    return section;
   }
   function renderAppRow(versions) {
     const current = versions.find((version) => version.current);
@@ -605,6 +731,7 @@ if (typeof document !== "undefined") {
   async function runAction(task) {
     if (working) return;
     working = true;
+    auditView = null;
     updateControls();
     notice("error", "");
     notice("message", "");
@@ -617,6 +744,18 @@ if (typeof document !== "undefined") {
       updateControls();
     }
   }
+  $("audit-details-close").onclick = () => $("audit-details").close();
+  $("audit-details").addEventListener("close", () => {
+    $("audit-details-json").textContent = "";
+  });
+  $("audit-details").addEventListener("click", (event) => {
+    const bounds = $("audit-details").getBoundingClientRect();
+    if (event.target === $("audit-details") &&
+        (event.clientX < bounds.left || event.clientX > bounds.right ||
+         event.clientY < bounds.top || event.clientY > bounds.bottom)) {
+      $("audit-details").close();
+    }
+  });
   $("decision-cancel").onclick = () => $("decision").close();
   $("decision").addEventListener("cancel", (event) => {
     if (working) event.preventDefault();
@@ -743,6 +882,7 @@ if (typeof document !== "undefined") {
       !document.hidden &&
       !working &&
       !$("decision").open &&
+      !$("audit-details").open &&
       !document.activeElement?.matches(
         'input, textarea, select, [contenteditable="true"]',
       )

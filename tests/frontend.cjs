@@ -61,3 +61,30 @@ test('app table sorts by latest publication across history, with unpublished app
   assert.equal(admin.lastPublished(groups[0]), 300);
   assert.equal(admin.lastPublished(groups[2]), 0);
 });
+
+test('audit attribution uses signing keys for submissions and user identities for admin actions', () => {
+  const signer = {kind: 'appSigningKey', identityId: '09'.repeat(32), displayName: 'Alice', signingKey: 'ab'.repeat(32)};
+  assert.equal(admin.auditActorName(signer), 'Signing key');
+  assert.deepEqual(admin.auditActorForDisplay(signer), {kind: 'appSigningKey', signingKey: signer.signingKey});
+  const reviewer = {...signer, kind: 'sandstormIdentity', signingKey: null};
+  assert.equal(admin.auditActorName(reviewer), 'Alice');
+  assert.deepEqual(admin.auditActorForDisplay(reviewer, 'submitted'), {kind: 'submissionApi', displayName: 'Submission API'});
+  assert.equal(admin.auditActorName({...signer, identityId: null}), 'Signing key');
+  assert.equal(admin.auditActorName({...reviewer, displayName: ''}), `Sandstorm user ${signer.identityId}`);
+  assert.equal(admin.auditActorName({kind: 'system', displayName: 'Marketplace system'}), 'Marketplace system');
+});
+
+test('audit table and JSON share attribution filtering without changing stored events', () => {
+  const tokenUser = {kind: 'appSigningKey', identityId: 'token-owner-id', displayName: 'Token owner', signingKey: 'verified-key'};
+  const stored = {action: 'publicationChanged', actor: {kind: 'system', displayName: 'Marketplace system'}, details: {latestDecision: 12, decisionActor: tokenUser}};
+  const displayed = admin.auditEventForDisplay(stored);
+  assert.equal(JSON.stringify(displayed).includes('Token owner'), false);
+  assert.equal(JSON.stringify(displayed).includes('token-owner-id'), false);
+  assert.equal(displayed.details.decisionActor.signingKey, 'verified-key');
+  assert.equal(stored.details.decisionActor.displayName, 'Token owner');
+  const submission = admin.auditEventForDisplay({action: 'submitted', actor: {...tokenUser, signingKey: null}, details: {}});
+  assert.equal(admin.auditActorName(submission.actor), 'Submission API');
+  assert.equal(JSON.stringify(submission).includes('Token owner'), false);
+  const approval = {action: 'approved', actor: {kind: 'sandstormIdentity', identityId: 'reviewer-id', displayName: 'Reviewer'}, details: {}};
+  assert.deepEqual(admin.auditEventForDisplay(approval), approval);
+});

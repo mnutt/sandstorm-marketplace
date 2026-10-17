@@ -113,7 +113,13 @@ impl Fixture {
             platform: Rc::new(RefCell::new(None)),
         });
         let mut fixture = Self {
-            admin: common::session(&view, &[true, true, false], false).await?,
+            admin: common::session_with_identity(
+                &view,
+                &[true, true, false],
+                false,
+                Some((&[7; 32], "Test approver")),
+            )
+            .await?,
             reviewer: common::session(&view, &[false, true, false], false).await?,
             submitter: common::session(&view, &[false, false, true], true).await?,
             _storage: storage,

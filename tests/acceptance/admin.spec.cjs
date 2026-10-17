@@ -230,3 +230,49 @@ test('deprecation hides discovery but preserves listings and downloads and can b
   await expect(page.getByRole('button', { name: 'Deprecate app', exact: true })).toBeVisible();
   expect(await publicVersion(request)).toBe(current.app.versionNumber);
 });
+
+test('private activity history records approvers, publication, and paginates safely', async ({ page, request }) => {
+  const rows = await queue(request);
+  const item = rows.find(row => row.app.versionNumber === 4);
+  // Build enough history to cross a storage chunk boundary without exposing the embargoed release.
+  for (let n = 0; n < 52; n++) {
+    expect((await request.post(`/admin/approve/${item.app.packageId}`, { data: '' })).ok()).toBeTruthy();
+    expect((await request.post(`/admin/unapprove/${item.app.packageId}`, { data: '' })).ok()).toBeTruthy();
+  }
+  await page.goto(`/reviewer/#app/${item.app.appId}`);
+  const history = page.locator('.audit-history');
+  await expect(history.getByRole('table', { name: 'Activity history' })).toBeVisible();
+  await expect(history.getByRole('columnheader')).toHaveText(['Date', 'Event', 'Actor', 'Build', 'Details']);
+  await expect(history.locator('tbody tr')).toHaveCount(50);
+  await expect(history.locator('tbody tr').first()).toContainText('Test approver');
+  await expect(history.locator('tbody tr').first()).toContainText('Approval revoked');
+  await history.getByRole('button', { name: 'Load older events' }).click();
+  await expect(history.locator('tbody tr')).toHaveCount(100);
+  await history.getByRole('button', { name: 'Load older events' }).click();
+  await expect(history.getByRole('button', { name: 'Load older events' })).not.toBeVisible();
+  await expect(history).toContainText('Package submitted');
+  await expect(history).toContainText('Public visibility changed');
+  expect((await request.get(`/submitter/audit/${item.app.appId}`)).ok()).toBeFalsy();
+  expect((await request.get(`/public/audit/${item.app.appId}/head.json`)).status()).toBe(404);
+  // Text is rendered as text, including rejection reasons that resemble HTML.
+  await request.post(`/admin/reject/${item.app.packageId}`, { data: '<img src=x onerror=alert(1)> fix this' });
+  await history.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(history.locator('tbody tr')).toHaveCount(50);
+  const detailsButton = history.locator('tbody tr').first().getByRole('cell').first().getByRole('button');
+  await detailsButton.click();
+  const dialog = page.getByRole('dialog', { name: /Event #\d+ details/ });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('pre')).toContainText('<img src=x onerror=alert(1)>');
+  await expect(dialog.locator('img')).toHaveCount(0);
+  expect(JSON.parse(await dialog.locator('pre').textContent()).action).toBe('rejected');
+  const bounds = await dialog.boundingBox();
+  expect(bounds.width).toBeGreaterThan(page.viewportSize().width * 0.85);
+  expect(bounds.width).toBeLessThan(page.viewportSize().width * 0.92);
+  expect(bounds.height).toBeGreaterThan(page.viewportSize().height * 0.9);
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect(detailsButton).toBeFocused();
+  await detailsButton.click();
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+});

@@ -945,3 +945,375 @@ fn deprecation_hides_discovery_preserves_downloads_and_survives_new_releases() -
     );
     Ok(())
 }
+
+#[test]
+fn audit_tracks_actors_retries_failed_publication_and_recovery() -> anyhow::Result<()> {
+    use marketplace_grain::audit::Actor;
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let actor = Actor {
+        kind: "sandstormIdentity".into(),
+        identity_id: Some("01".repeat(32)),
+        display_name: "Reviewer Alice".into(),
+        signing_key: None,
+    };
+    let reviewer = registry.with_actor(actor.clone());
+    let id = upload(&registry, 1);
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].action, "submitted");
+    // Re-upload is a retry, not another submission.
+    assert_eq!(upload(&registry, 1), id);
+    assert_eq!(registry.audit_page(&app, None)?.events.len(), 1);
+    let signed = request(&id, Some(s::SubmissionState::Publish), 1);
+    registry.submission(&signed)?;
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events[0].actor.kind, "appSigningKey");
+    assert_eq!(
+        events[0].actor.signing_key.as_deref(),
+        Some(hex::encode(key().verifying_key().as_bytes()).as_str())
+    );
+    assert!(!events.iter().any(|e| e.action == "publicationChanged"));
+    let before = events.len();
+    registry.submission(&signed)?;
+    assert_eq!(registry.audit_page(&app, None)?.events.len(), before);
+    // Fail rendering after saving approval.
+    std::fs::remove_dir_all(dir.path().join("catalog"))?;
+    std::fs::write(dir.path().join("catalog"), "blocked")?;
+    assert!(reviewer.review(&id, "approve", "").is_err());
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events[0].action, "approved");
+    assert_eq!(events[0].actor, actor);
+    assert!(!events.iter().any(|e| e.action == "publicationChanged"));
+    let decision = events[0].number;
+    std::fs::remove_file(dir.path().join("catalog"))?;
+    let reopened = Registry::new(dir.path().to_owned())?;
+    reopened.publish()?;
+    let events = reopened.audit_page(&app, None)?.events;
+    assert_eq!(events[0].action, "publicationChanged");
+    assert_eq!(events[0].details["latestDecision"], decision);
+    assert_eq!(
+        events[0].details["decisionActor"]["displayName"],
+        "Reviewer Alice"
+    );
+    assert_eq!(events[0].details["next"]["download"], true);
+    let count = events.len();
+    reviewer.review(&id, "approve", "")?;
+    reopened.publish()?;
+    assert_eq!(reopened.audit_page(&app, None)?.events.len(), count);
+    reviewer.review(&id, "unapprove", "")?;
+    let events = reopened.audit_page(&app, None)?.events;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.action == "approvalRevoked" && e.actor == actor)
+    );
+    assert_eq!(events[0].details["next"]["approvedListing"], false);
+    reviewer.review(&id, "reject", "Please fix this.")?;
+    let events = reopened.audit_page(&app, None)?.events;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.action == "rejected" && e.details["next"]["reason"] == "Please fix this.")
+    );
+    assert!(!dir.path().join("www/audit").exists());
+    Ok(())
+}
+
+#[test]
+fn audit_baselines_and_imports_do_not_invent_historical_actors() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let first = upload(&registry, 1);
+    let second = upload(&registry, 2);
+    // Model a pre-audit installation with two releases of the same app.
+    std::fs::remove_dir_all(dir.path().join("audit"))?;
+    for id in [&first, &second] {
+        std::fs::remove_file(registry.package_dir(id)?.join("audit-tracked"))?;
+    }
+    let registry = Registry::new(dir.path().to_owned())?;
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events.len(), 2);
+    assert!(
+        events
+            .iter()
+            .all(|e| e.action == "baseline" && e.actor.kind == "system")
+    );
+    assert_eq!(
+        Registry::new(dir.path().to_owned())?
+            .audit_page(&app, None)?
+            .events
+            .len(),
+        2
+    );
+    let imported = tempfile::tempdir()?;
+    let registry = Registry::new(imported.path().to_owned())?;
+    let mut file = registry.temporary()?;
+    file.write_all(&import_bundle(false)?)?;
+    registry.import_catalog(file.path())?;
+    let events = registry.audit_page(&app, None)?.events;
+    assert!(events.iter().any(|e| e.action == "imported"));
+    assert!(events.iter().any(|e| e.action == "publicationChanged"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.action == "approved" || e.action == "baseline")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn audit_rpc_identity_and_access() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let registry = Registry::new(temp.path().to_owned())?;
+    let view: ui_view::Client = capnp_rpc::new_client(View {
+        registry: registry.clone(),
+        platform: Rc::new(RefCell::new(None)),
+    });
+    let api = session_with_identity(
+        &view,
+        &[false, false, true],
+        true,
+        Some((&[9; 32], "Uploader")),
+    )
+    .await?;
+    let admin = session_with_identity(
+        &view,
+        &[true, true, false],
+        false,
+        Some((&[7; 32], "Approver")),
+    )
+    .await?;
+    let reviewer = session(&view, &[false, true, false], false).await?;
+    post(&api, "upload", &package(1)).await?;
+    let id = registry.package_ids()?.remove(0);
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events[0].actor.display_name, "Uploader");
+    assert_eq!(events[0].actor.identity_id, Some("09".repeat(32)));
+    assert!(events[0].actor.signing_key.is_none());
+    post(
+        &api,
+        "status",
+        &request(&id, Some(s::SubmissionState::Review), 1),
+    )
+    .await?;
+    let event = registry.audit_page(&app, None)?.events.remove(0);
+    assert_eq!(event.actor.kind, "appSigningKey");
+    assert_eq!(event.actor.identity_id, Some("09".repeat(32)));
+    post(&admin, &format!("approve/{id}"), b"").await?;
+    let event = registry.audit_page(&app, None)?.events.remove(0);
+    assert_eq!(event.actor.display_name, "Approver");
+    assert_eq!(event.actor.identity_id, Some("07".repeat(32)));
+    for (client, allowed) in [(&admin, true), (&reviewer, true), (&api, false)] {
+        let mut get = client.get_request();
+        get.get().set_path(&format!("audit/{app}"));
+        assert_eq!(
+            matches!(
+                get.send().promise.await?.get()?.which()?,
+                web::response::Content(_)
+            ),
+            allowed
+        );
+    }
+    for path in [
+        "audit/../packages".into(),
+        format!("audit/{app}/invalid"),
+        format!("audit/{app}/1/2"),
+    ] {
+        let mut get = admin.get_request();
+        get.get().set_path(&path);
+        assert!(matches!(
+            get.send().promise.await?.get()?.which()?,
+            web::response::ClientError(_)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_recovers_visibility_installed_before_history_was_written() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let id = upload(&registry, 1);
+    registry.submission(&request(&id, Some(s::SubmissionState::Publish), 1))?;
+    // Save approval but block the following catalog build.
+    std::fs::remove_dir_all(dir.path().join("catalog"))?;
+    std::fs::write(dir.path().join("catalog"), "blocked")?;
+    assert!(registry.review(&id, "approve", "").is_err());
+    let audit_dir = dir.path().join("audit").join(&app);
+    let saved: Vec<_> = std::fs::read_dir(&audit_dir)?
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    std::fs::remove_file(dir.path().join("catalog"))?;
+    registry.publish()?;
+    // Model a crash after the site swap but before the visibility transaction.
+    for (path, bytes) in saved {
+        std::fs::write(path, bytes)?;
+    }
+    std::fs::remove_file(registry.package_dir(&id)?.join("audit-public.json"))?;
+    let recovered = Registry::new(dir.path().to_owned())?;
+    // A later decision first reconciles the installed generation, then records itself.
+    recovered.review(&id, "reject", "Revoke after recovery")?;
+    let events = recovered.audit_page(&app, None)?.events;
+    let publication: Vec<_> = events
+        .iter()
+        .filter(|e| e.action == "publicationChanged")
+        .collect();
+    assert_eq!(publication.len(), 2);
+    assert_eq!(publication[0].details["next"]["download"], false);
+    assert_eq!(publication[1].details["next"]["download"], true);
+    assert!(
+        publication[1].number
+            < events
+                .iter()
+                .find(|e| e.action == "rejected")
+                .unwrap()
+                .number
+    );
+    recovered.publish()?;
+    assert_eq!(recovered.audit_page(&app, None)?.events.len(), events.len());
+    Ok(())
+}
+
+#[test]
+fn audit_import_failure_does_not_leave_an_unrecoverable_transaction() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    std::fs::create_dir(dir.path().join("packages/incomplete"))?;
+    let mut file = registry.temporary()?;
+    file.write_all(&import_bundle(false)?)?;
+    assert!(registry.import_catalog(file.path()).is_err());
+    assert!(!dir.path().join("audit-transaction.json").exists());
+    Registry::new(dir.path().to_owned())?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn audit_new_submission_after_legacy_migration_is_not_a_baseline() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let old = Registry::new(temp.path().to_owned())?;
+    let previous = upload(&old, 331);
+    std::fs::remove_dir_all(temp.path().join("audit"))?;
+    std::fs::remove_file(old.package_dir(&previous)?.join("audit-tracked"))?;
+    drop(old);
+    let registry = Registry::new(temp.path().to_owned())?;
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let view: ui_view::Client = capnp_rpc::new_client(View {
+        registry: registry.clone(),
+        platform: Rc::new(RefCell::new(None)),
+    });
+    let api = session(&view, &[false, false, true], true).await?;
+    let data = package(332);
+    let mut start = api.post_streaming_request();
+    start.get().set_path("upload");
+    start.get().set_expected_size(data.len() as u64);
+    let stream = start.send().promise.await?.get()?.get_stream()?;
+    let response = stream.get_response_request().send().promise;
+    let bytes: byte_stream::Client = cast(stream);
+    let mut write = bytes.write_request();
+    write.get().set_data(&data);
+    write.send().await?;
+    bytes.done_request().send().promise.await?;
+    assert!(matches!(
+        response.await?.get()?.which()?,
+        web::response::NoContent(_)
+    ));
+    let current = registry
+        .package_ids()?
+        .into_iter()
+        .find(|id| id != &previous)
+        .unwrap();
+    post(
+        &api,
+        "status",
+        &request(&current, Some(s::SubmissionState::Publish), 1),
+    )
+    .await?;
+    let events = Registry::new(temp.path().to_owned())?
+        .audit_page(&app, None)?
+        .events;
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].action, "authorStateChanged");
+    assert_eq!(events[0].actor.kind, "appSigningKey");
+    assert_eq!(events[1].action, "submitted");
+    assert_eq!(events[1].version, Some(332));
+    assert_eq!(events[1].actor.kind, "unidentifiedSession");
+    assert_eq!(events[2].action, "baseline");
+    assert_eq!(events[2].version, Some(331));
+    Ok(())
+}
+
+#[test]
+fn audit_resubmissions_record_fresh_intent_but_not_status_checks_or_retries() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let registry = Registry::new(temp.path().to_owned())?;
+    let actor = marketplace_grain::audit::Actor {
+        kind: "sandstormIdentity".into(),
+        identity_id: Some("09".repeat(32)),
+        display_name: "Author".into(),
+        signing_key: None,
+    };
+    let author = registry.with_actor(actor.clone());
+    let app = ids::app_id(key().verifying_key().as_bytes());
+    let id = upload(&registry, 1);
+    author.submission(&request(&id, Some(s::SubmissionState::Publish), 1))?;
+    registry.review(&id, "approve", "")?;
+    let before = registry.audit_page(&app, None)?.events.len();
+    let cause_path = temp.path().join("audit").join(&app).join("cause.json");
+    let cause = std::fs::read(&cause_path)?;
+    let resubmit = request(&id, Some(s::SubmissionState::Publish), 2);
+    author.submission(&resubmit)?;
+    let events = registry.audit_page(&app, None)?.events;
+    assert_eq!(events.len(), before + 1);
+    assert_eq!(events[0].action, "resubmitted");
+    assert_eq!(events[0].version, Some(1));
+    assert_eq!(events[0].package_id.as_deref(), Some(id.as_str()));
+    assert_eq!(events[0].actor.kind, "appSigningKey");
+    assert_eq!(events[0].actor.identity_id, actor.identity_id);
+    assert_eq!(events[0].actor.display_name, "Author");
+    assert_eq!(
+        events[0].actor.signing_key,
+        Some(hex::encode(key().verifying_key().as_bytes()))
+    );
+    assert_eq!(events[0].details["previous"], events[0].details["next"]);
+    assert_eq!(events[0].details["next"]["review"], "approved");
+    assert_eq!(events[0].details["sequenceNumber"], "2");
+    // A no-op must not displace the decision associated with public visibility.
+    assert_eq!(std::fs::read(&cause_path)?, cause);
+    let reopened = Registry::new(temp.path().to_owned())?;
+    reopened.submission(&resubmit)?;
+    reopened.submission(&request(&id, None, 0))?;
+    assert_eq!(reopened.audit_page(&app, None)?.events.len(), before + 1);
+    assert!(
+        reopened
+            .submission(&request(&id, Some(s::SubmissionState::Publish), 1))
+            .is_err()
+    );
+    let mut forged = request(&id, Some(s::SubmissionState::Publish), 3);
+    *forged.last_mut().unwrap() ^= 1;
+    assert!(reopened.submission(&forged).is_err());
+    assert_eq!(reopened.audit_page(&app, None)?.events.len(), before + 1);
+    // Repeated review/embargo and withdrawal requests also record fresh intent.
+    for (state, sequence) in [
+        (s::SubmissionState::Review, 3),
+        (s::SubmissionState::Ignore, 5),
+    ] {
+        reopened.submission(&request(&id, Some(state), sequence))?;
+        reopened.submission(&request(&id, Some(state), sequence + 1))?;
+        let events = reopened.audit_page(&app, None)?.events;
+        assert_eq!(events[0].action, "resubmitted");
+        let count = events.len();
+        reopened.submission(&request(&id, Some(state), sequence + 1))?;
+        assert_eq!(reopened.audit_page(&app, None)?.events.len(), count);
+    }
+    Ok(())
+}
