@@ -7,9 +7,11 @@ use sha2::{Digest, Sha512};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
+    num::NonZeroU64,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
     process::{Command, Stdio},
+    time::Instant,
 };
 
 pub const APP_VERSION: u32 = 5;
@@ -256,7 +258,10 @@ pub fn prepare_dev(root: &Path) -> Result<()> {
 }
 
 pub fn package(root: &Path, email: &str, debug: bool, release: &Release) -> Result<()> {
+    let started = Instant::now();
     let staged = stage(root, email, debug, release)?;
+    println!("Build and staging finished in {:.2?}", started.elapsed());
+    let archive_started = Instant::now();
     let stage = staged.path();
     let signing = signing_key(root, release.test_key)?;
     let mut archive = Builder::new_default();
@@ -276,20 +281,44 @@ pub fn package(root: &Path, email: &str, debug: bool, release: &Release) -> Resu
     let mut value = signature.init_root::<p::signature::Builder>();
     value.set_public_key(signing.verifying_key().as_bytes());
     value.set_signature(&signed);
+    println!(
+        "Archive and signing finished in {:.2?} ({} bytes)",
+        archive_started.elapsed(),
+        bytes.len()
+    );
     let mut artifact = tempfile::NamedTempFile::new_in(root.join("build"))?;
     artifact.write_all(spk::MAGIC)?;
-    let mut encoder =
-        lzma_rust2::XzWriter::new(artifact.as_file_mut(), lzma_rust2::XzOptions::default())?;
+    let mut options = lzma_rust2::XzOptions::default();
+    // Independent blocks allow parallel compression without lowering the preset.
+    // Three dictionary lengths per block retain useful compression context;
+    // cap workers to limit concurrent encoder memory on large hosts.
+    let block_size = u64::from(options.lzma_options.dict_size) * 3;
+    options.set_block_size(NonZeroU64::new(block_size));
+    let workers = std::thread::available_parallelism().map_or(1, |count| count.get().min(4)) as u32;
+    println!("Compressing XZ with {workers} workers and {block_size}-byte blocks");
+    let compression_started = Instant::now();
+    let mut encoder = lzma_rust2::XzWriterMt::new(artifact.as_file_mut(), options, workers)?;
     serialize::write_message(&mut encoder, &signature)?;
     encoder.write_all(&bytes)?;
     encoder.finish()?;
+    println!(
+        "XZ compression finished in {:.2?} ({} bytes)",
+        compression_started.elapsed(),
+        artifact.as_file().metadata()?.len()
+    );
     artifact.as_file().sync_all()?;
+    let verification_started = Instant::now();
     spk::verify(artifact.path())?;
+    println!(
+        "SPK verification finished in {:.2?}",
+        verification_started.elapsed()
+    );
     artifact.persist(root.join("build/marketplace.spk"))?;
     install_stage(root, staged)?;
     println!(
-        "Built build/marketplace.spk (app ID {})",
-        ids::app_id(signing.verifying_key().as_bytes())
+        "Built build/marketplace.spk (app ID {}) in {:.2?}",
+        ids::app_id(signing.verifying_key().as_bytes()),
+        started.elapsed()
     );
     Ok(())
 }

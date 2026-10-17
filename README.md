@@ -93,6 +93,12 @@ for future updates; they are ignored by Git and excluded from the package.
 Existing SDK-format signing keys are preserved. An incomplete or mismatched
 identity causes packaging to fail instead of silently changing the app ID.
 
+Packaging reports separate timings for build/staging, archive/signing, XZ
+compression, and verification. Compression uses up to four CPU workers with
+24 MiB blocks and the default compression preset. The compression library is
+optimized even in development builds; parallel blocks may slightly increase SPK
+size compared with a single block.
+
 The default contact address is a placeholder for local development. Set a real
 address before distributing the package. Increment `APP_VERSION` and update
 `MARKETING_VERSION` in `xtask/src/package.rs` for releases, or supply explicit
