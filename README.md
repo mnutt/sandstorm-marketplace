@@ -395,7 +395,8 @@ the actual `spk publish` client, and asks the SDK to verify the Rust-built packa
 when available. The SDK and GnuPG serve only as independent test references.
 
 The legacy `spk publish` wire protocol retains its existing unverified webkey-hash
-field. This app does not send notification emails to the old Sandstorm administrators.
+field. No legacy administrator addresses are embedded in the app; notification
+recipients must be explicitly configured per grain.
 
 ## Browser acceptance tests and GitHub Actions
 
@@ -470,6 +471,37 @@ Admin app pages use `/<app_id>/` URLs. Navigation updates Sandstorm’s address 
 and reloading or reopening a link restores the selected app. Browser Back and
 Forward work between the app list and app pages.
 
+### Submission notification emails
+
+Approvers can configure **Submission notifications** on the administration home
+page with one administrator or distribution-list email address. The destination
+is stored per grain and defaults to unset. Leaving it blank disables email;
+there are no hardcoded recipients or app-level SMTP credentials. Messages use
+Sandstorm's email service and the grain's own sender address, so outbound email
+must be configured on the Sandstorm server.
+
+A signed request for review or publication queues a notification with the app
+name, build, app/package IDs, and requested state. Fresh resubmissions also notify;
+status polls, exact request retries, withdrawals, raw uploads, and catalog imports
+do not. Enabling notifications does not send mail for historical submissions.
+Author review-decision emails are not implemented.
+
+The notification is queued in the same SQLite transaction as the submission's
+audit event. Delivery runs separately and cannot fail a successful submission.
+A temporary Sandstorm wake handle keeps the grain running during each send;
+canceling that activity leaves the message queued for retry.
+The settings panel shows pending/failed counts, the latest error, and the last
+successful handoff to Sandstorm. **Retry pending emails** requests an immediate
+retry. Otherwise, submission API requests and approver dashboard refreshes retry
+due messages with a delay starting at one minute and increasing to one hour.
+Pending messages survive restarts; there is no background timer that wakes an
+idle grain solely for email delivery.
+
+Changing or clearing the destination discards pending messages for the old
+address. A send already in progress may still complete. Successful messages are
+removed from the queue. Retries reuse a stable Message-ID, but a crash or timeout
+after the mail service accepts a message can still cause a duplicate delivery.
+
 ### Private audit history
 
 Each app's administration page includes **Activity history**, available to reviewers
@@ -521,7 +553,8 @@ ledger against someone who can modify grain storage or restore an older backup.
 ### SQLite storage
 
 `/var/marketplace.sqlite` is authoritative for all registry metadata. The schema is
-in [`schema.sql`](crates/marketplace-grain/src/schema.sql):
+in [`schema.sql`](crates/marketplace-grain/src/schema.sql) and
+[`notifications.sql`](crates/marketplace-grain/src/notifications.sql):
 
 | Tables | Contents |
 | --- | --- |
@@ -530,6 +563,7 @@ in [`schema.sql`](crates/marketplace-grain/src/schema.sql):
 | `audit_events` | Per-app numbered events, actor snapshots and JSON details |
 | `author_profiles`, `release_author_profiles` | Cached Keybase profiles and imported per-release author information |
 | `capabilities` | Saved capability tokens |
+| `notification_settings`, `notification_outbox` | Submission email destination, delivery status, and pending messages |
 | `registry_state` | State revision and installed generation |
 | `publication_generations`, `publication_items`, `publication_causes` | Publication attempts, visibility snapshots and decision context |
 

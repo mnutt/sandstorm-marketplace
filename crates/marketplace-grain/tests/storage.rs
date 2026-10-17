@@ -67,13 +67,13 @@ fn sqlite_initialization_restart_and_schema_version() -> Result<()> {
     let db = rusqlite::Connection::open(dir.path().join("marketplace.sqlite"))?;
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        1
+        2
     );
-    db.execute_batch("PRAGMA user_version=2")?;
+    db.execute_batch("PRAGMA user_version=3")?;
     assert!(Registry::new(dir.path().into()).is_err());
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        2
+        3
     );
     Ok(())
 }

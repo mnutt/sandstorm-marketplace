@@ -35,10 +35,10 @@ impl Database {
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            matches!(version, 0 | 1),
+            matches!(version, 0..=2),
             "marketplace database is newer than this program"
         );
-        if version == 0 {
+        if version < 2 {
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // Recheck after acquiring the writer lock in case another opener initialized it.
@@ -46,9 +46,14 @@ impl Database {
             match version {
                 0 => {
                     tx.execute_batch(include_str!("schema.sql"))?;
-                    tx.execute_batch("PRAGMA user_version=1;")?;
+                    tx.execute_batch(include_str!("notifications.sql"))?;
+                    tx.execute_batch("PRAGMA user_version=2;")?;
                 }
-                1 => {}
+                1 => {
+                    tx.execute_batch(include_str!("notifications.sql"))?;
+                    tx.execute_batch("PRAGMA user_version=2;")?;
+                }
+                2 => {}
                 _ => anyhow::bail!("unsupported marketplace database version"),
             }
             tx.commit()?;
@@ -329,6 +334,7 @@ pub(crate) fn append_events(tx: &Connection, events: Vec<Event>) -> Result<()> {
             "audit event exceeds 32 KiB; shorten the reason"
         );
         insert_event(tx, &event)?;
+        crate::notifications::enqueue(tx, &event)?;
         tx.execute(
             "UPDATE apps SET next_event_number=? WHERE app_id=?",
             params![

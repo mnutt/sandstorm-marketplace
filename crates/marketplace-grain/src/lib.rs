@@ -5,6 +5,7 @@ mod catalog;
 pub mod ids;
 mod import;
 mod keybase;
+mod notifications;
 pub mod registry;
 pub mod rpc;
 pub mod spk;

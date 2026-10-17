@@ -128,6 +128,8 @@ if (typeof document !== "undefined") {
   const pageSize = 25;
   let auditView = null;
   let publicBase = null;
+  let notificationSending = false;
+  let notificationDirty = false;
 
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -170,6 +172,7 @@ if (typeof document !== "undefined") {
       node.disabled = working || serverBusy;
     });
     $("import-submit").disabled = working || serverBusy;
+    $("notifications-retry").disabled = working || serverBusy || notificationSending;
     notice(
       "access-note",
       !canApprove
@@ -755,6 +758,17 @@ if (typeof document !== "undefined") {
       canApprove = snapshot.canApprove;
       serverBusy = snapshot.busy;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
+      $("notifications").hidden = !canApprove;
+      const notifications = snapshot.notifications;
+      if (canApprove && notifications) {
+        if (!notificationDirty) $("notification-recipient").value = notifications.recipient;
+        const status = notifications.recipient
+          ? `${notifications.pending} pending · ${notifications.failed} failed${notifications.sending ? " · Sending…" : ""}${notifications.lastSentAt ? ` · Last sent ${date(notifications.lastSentAt)}` : ""}`
+          : "Email notifications are disabled.";
+        $("notification-status").textContent = status + (notifications.lastError ? ` · ${notifications.lastError}` : "");
+        $("notifications-retry").hidden = !notifications.pending;
+        notificationSending = notifications.sending;
+      }
       render();
     } finally {
       refreshing = false;
@@ -860,6 +874,21 @@ if (typeof document !== "undefined") {
     page = 0;
     render();
   };
+  $("notification-recipient").oninput = () => { notificationDirty = true; };
+  $("notifications-form").onsubmit = async (event) => {
+    event.preventDefault();
+    await runAction(async () => {
+      await request("notifications", $("notification-recipient").value.trim());
+      notificationDirty = false;
+      notice("message", "Notification settings saved.");
+      await refresh();
+    });
+  };
+  $("notifications-retry").onclick = () => runAction(async () => {
+    await request("notifications/retry", "");
+    notice("message", "Pending email delivery requested.");
+    await refresh();
+  });
   $("import-form").onsubmit = async (event) => {
     event.preventDefault();
     const file = $("import-file").files[0];

@@ -30,6 +30,8 @@ pub struct AdminSnapshot {
     pub releases: Vec<ReviewRelease>,
     pub can_approve: bool,
     pub busy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<crate::notifications::Settings>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +93,7 @@ fn selected_releases(releases: &[Release]) -> Result<BTreeMap<&str, &Release>> {
 pub struct Registry {
     pub root: PathBuf,
     busy: Arc<AtomicBool>,
+    pub(crate) notification_busy: Arc<AtomicBool>,
     pub(crate) actor: Actor,
     pub(crate) database: Arc<Database>,
 }
@@ -109,6 +112,7 @@ impl Registry {
         let registry = Self {
             root,
             busy: Arc::new(AtomicBool::new(false)),
+            notification_busy: Arc::new(AtomicBool::new(false)),
             actor: Actor::default(),
             database,
         };

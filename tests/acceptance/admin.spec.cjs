@@ -360,3 +360,24 @@ test('Public Page is hidden when only experimental releases remain', async ({ pa
   await expect(page.locator('.app-info')).toContainText('No approved public version.');
   await expect(page.getByRole('link', { name: 'Public Page', exact: true })).toHaveCount(0);
 });
+
+test('submission notification recipient defaults to unset and is approver-only', async ({ page, request }) => {
+  await page.goto('/admin/');
+  const settings = page.getByRole('region', { name: 'Submission notifications' });
+  await expect(settings).toBeVisible();
+  await expect(page.getByLabel('Notification email')).toHaveValue('');
+  await expect(page.locator('#notification-status')).toHaveText('Email notifications are disabled.');
+  await page.getByLabel('Notification email').fill('review-list@example.org');
+  await settings.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('#message')).toHaveText('Notification settings saved.');
+  await page.reload();
+  await expect(page.getByLabel('Notification email')).toHaveValue('review-list@example.org');
+  expect((await (await request.get('/reviewer/admin')).json()).notifications).toBeUndefined();
+  expect((await request.post('/reviewer/notifications', { data: 'other@example.org' })).ok()).toBeFalsy();
+  expect((await request.post('/reviewer/notifications/retry', { data: '' })).ok()).toBeFalsy();
+  await page.getByLabel('Notification email').fill('');
+  await settings.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('#notification-status')).toHaveText('Email notifications are disabled.');
+  await page.goto('/reviewer/');
+  await expect(page.locator('#notifications')).toBeHidden();
+});

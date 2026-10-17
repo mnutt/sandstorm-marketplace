@@ -92,6 +92,7 @@ impl web::Server for Session {
         let context = self.context.clone();
         let api = self.api;
         let can_approve = self.can_approve;
+        let platform = self.platform.clone();
         Promise::from_future(async move {
             let request_path = params
                 .get()
@@ -117,8 +118,10 @@ impl web::Server for Session {
                             releases: registry.queue()?,
                             can_approve,
                             busy: registry.is_busy(),
+                            notifications: if can_approve { Some(crate::notifications::settings(&registry)?) } else { None },
                         };
                         content(results.get(), "application/json", &serde_json::to_vec(&snapshot)?);
+                        if can_approve { crate::notifications::start(registry.clone(), context.clone(), platform.clone()); }
                     }
                     path if path.starts_with("audit/") => {
                         let parts: Vec<_> = path[6..].split('/').collect();
@@ -255,6 +258,12 @@ impl web::Server for Session {
                         )
                         .await?;
                         results.get().init_no_content();
+                    } else if path == "notifications" {
+                        crate::notifications::configure(&registry, std::str::from_utf8(body)?)?;
+                        results.get().init_no_content();
+                    } else if path == "notifications/retry" {
+                        crate::notifications::retry(&registry)?;
+                        results.get().init_no_content();
                     } else if let Some(app_id) = path.strip_prefix("deprecation/") {
                         let value = serde_json::from_slice(body)?;
                         registry.set_deprecation(app_id, value)?;
@@ -289,6 +298,11 @@ impl web::Server for Session {
                 Ok(())
             }
             .await;
+            if request_path == "status" && api
+                || (!api && can_approve && request_path == "notifications/retry")
+            {
+                crate::notifications::start(registry.clone(), context.clone(), platform.clone());
+            }
             if let Err(err) = action {
                 failure(
                     results.get(),
