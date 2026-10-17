@@ -598,7 +598,7 @@ if (typeof document !== "undefined") {
       "meta",
     );
     const actions = element("td");
-    actions.append(appLink(item, releaseCount(versions.length)));
+    actions.append(appLink(item, String(versions.length)));
     tr.append(app, version, when, actions);
     return tr;
   }
@@ -669,7 +669,9 @@ if (typeof document !== "undefined") {
     for (const item of pending) {
       const versions = groupsById.get(item.app.appId);
       const card = element("article", undefined, "card");
-      card.append(element("h3", item.app.name));
+      const title = element("h3");
+      title.append(appLink(item));
+      card.append(title);
       const current = versions.find((version) => version.current);
       card.append(
         element(
@@ -681,7 +683,6 @@ if (typeof document !== "undefined") {
         ),
       );
       card.append(release(item, versions));
-      card.append(appLink(item, "View app history"));
       rail.append(card);
     }
   }

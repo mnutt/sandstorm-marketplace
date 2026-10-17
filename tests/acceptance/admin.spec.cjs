@@ -21,7 +21,7 @@ test('review, publish, history, rollback, rejection, and restoring latest', asyn
   await page.goto('/admin/');
   await expect(page.getByRole('table')).toBeVisible();
   await expect(page.locator('#review-queue .card')).toHaveCount(2);
-  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await expect(page.locator('#app-detail .release')).toHaveCount(4);
   await page.reload();
   await expect(release(page, 3)).toBeVisible();
@@ -100,7 +100,7 @@ test('reviewers download embargoed packages but cannot approve or expose them pu
 test('idle refresh continues after navigation and discovers new submissions', async ({ page, request }) => {
   await page.clock.install();
   await page.goto('/admin/');
-  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
   await expect(page.locator('#catalog-heading h1')).toBeFocused();
   expect((await request.post('/__test/submit', { data: '5' })).ok()).toBeTruthy();
@@ -110,7 +110,7 @@ test('idle refresh continues after navigation and discovers new submissions', as
 test('refresh does not interrupt a rejection draft', async ({ page, request }) => {
   await page.clock.install();
   await page.goto('/admin/');
-  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await release(page, 3).getByRole('button', { name: 'Reject / request update', exact: true }).click();
   await page.getByLabel('Reason for the author').fill('Draft review');
   await request.post('/__test/submit', { data: '5' });
@@ -120,7 +120,7 @@ test('refresh does not interrupt a rejection draft', async ({ page, request }) =
 });
 test('refresh failure after a saved decision is visible on the page', async ({ page, request }) => {
   await page.goto('/admin/');
-  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await request.post('/__test/fail-next-queue');
   await decide(page, release(page, 3), 'Approve');
   await expect(page.locator('#error')).toContainText('The decision was saved, but the view could not refresh');
@@ -144,7 +144,7 @@ test('mobile layout preserves table and review navigation', async ({ page }) => 
   await page.goto('/admin/');
   await expect(page.getByRole('table')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
-  await page.locator('#review-queue').getByRole('link', { name: 'View app history' }).first().click();
+  await page.locator('#review-queue h3').getByRole('link').first().click();
   await expect(page.getByRole('heading', { name: 'Version history' })).toBeVisible();
 });
 
@@ -284,7 +284,7 @@ test('private activity history records approvers, publication, and paginates saf
 test('app paths survive direct loads, reloads, and browser history', async ({ page, request }) => {
   const { app } = (await queue(request))[0];
   await page.goto('/admin/');
-  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/admin/${app.appId}/$`));
   await page.reload();
   await expect(page.locator('#app-detail h1')).toHaveText(app.name);
@@ -328,7 +328,7 @@ test('Sandstorm shell URL follows app navigation and restores the iframe on relo
   }));
   await page.goto('/shell/');
   const grain = page.frameLocator('#grain');
-  await grain.getByRole('link', { name: app.name, exact: true }).click();
+  await grain.locator('#queue').getByRole('link', { name: app.name, exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/shell/${app.appId}/$`));
   await page.reload();
   await expect(grain.locator('#app-detail h1')).toHaveText(app.name);
