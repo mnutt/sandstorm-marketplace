@@ -462,6 +462,10 @@ survives new releases and restarts. App policy is stored in SQLite and
 included in Sandstorm grain backups. A public catalog sync/import only includes
 listed apps; it is not a full grain backup and does not preserve deprecated apps.
 
+Admin app pages use `/<app_id>/` URLs. Navigation updates Sandstorm’s address bar,
+and reloading or reopening a link restores the selected app. Browser Back and
+Forward work between the app list and app pages.
+
 ### Private audit history
 
 Each app's administration page includes **Activity history**, available to reviewers

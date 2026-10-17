@@ -158,7 +158,7 @@ pub fn render_preview(
     template.preview = true;
     template.public_download = public_download;
     template.root = "../";
-    template.home_href = format!("../#app/{}", app.app_id);
+    template.home_href = format!("../{}/", app.app_id);
     template.package_url = format!("../download/{}", app.package_id);
     template.icon_url = images.get(&app.image_id).cloned().unwrap_or_default();
     for (shot, source) in template.screenshots.iter_mut().zip(&details.screenshots) {

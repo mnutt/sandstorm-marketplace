@@ -44,7 +44,7 @@ test('review, publish, history, rollback, rejection, and restoring latest', asyn
 test('reviewers download embargoed packages but cannot approve or expose them publicly', async ({ page, request }) => {
   const rows = await queue(request);
   const privateRelease = rows.find(row => row.app.versionNumber === 4);
-  await page.goto(`/reviewer/#app/${privateRelease.app.appId}`);
+  await page.goto(`/reviewer/${privateRelease.app.appId}/`);
   await expect(page.getByText('Read-only reviewer access.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
   const before = await (await request.get('/public/apps/index.json')).json();
@@ -127,7 +127,7 @@ test('malformed stored metadata can be rejected through the admin UI', async ({ 
   const badId = await (await request.post('/__test/invalid-metadata')).text();
   const row = (await queue(request)).find(row => row.app.packageId === badId);
   expect(row.validationError).toContain('utf-8');
-  await page.goto(`/admin/#app/${row.app.appId}`);
+  await page.goto(`/admin/${row.app.appId}/`);
   const card = page.locator('#app-detail .release').filter({ hasText: 'Unlabeled (build 99)' });
   await expect(card).toContainText('Invalid package metadata');
   await expect(card.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
@@ -216,7 +216,7 @@ test('deprecation hides discovery but preserves listings and downloads and can b
   for (const role of ['reviewer', 'submitter']) {
     expect((await request.post(`/${role}/deprecation/${appId}`, { data: '{}' })).ok()).toBeFalsy();
   }
-  await page.goto(`/admin/#app/${appId}`);
+  await page.goto(`/admin/${appId}/`);
   await page.getByRole('button', { name: 'Deprecate app', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Restore app to indexes' })).toBeVisible();
   expect(await publicVersion(request)).toBeUndefined();
@@ -225,7 +225,7 @@ test('deprecation hides discovery but preserves listings and downloads and can b
   await page.goto(`/public/app/${appId}/`);
   await expect(page.locator('.deprecation-notice')).toContainText('This app is deprecated.');
   await expect(page.getByRole('link', { name: 'Download SPK', exact: true })).toBeVisible();
-  await page.goto(`/admin/#app/${appId}`);
+  await page.goto(`/admin/${appId}/`);
   await page.getByRole('button', { name: 'Restore app to indexes' }).click();
   await expect(page.getByRole('button', { name: 'Deprecate app', exact: true })).toBeVisible();
   expect(await publicVersion(request)).toBe(current.app.versionNumber);
@@ -239,7 +239,7 @@ test('private activity history records approvers, publication, and paginates saf
     expect((await request.post(`/admin/approve/${item.app.packageId}`, { data: '' })).ok()).toBeTruthy();
     expect((await request.post(`/admin/unapprove/${item.app.packageId}`, { data: '' })).ok()).toBeTruthy();
   }
-  await page.goto(`/reviewer/#app/${item.app.appId}`);
+  await page.goto(`/reviewer/${item.app.appId}/`);
   const history = page.locator('.audit-history');
   await expect(history.getByRole('table', { name: 'Activity history' })).toBeVisible();
   await expect(history.getByRole('columnheader')).toHaveText(['Date', 'Event', 'Actor', 'Build', 'Details']);
@@ -275,4 +275,62 @@ test('private activity history records approvers, publication, and paginates saf
   await detailsButton.click();
   await dialog.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(dialog).not.toBeVisible();
+});
+
+test('app paths survive direct loads, reloads, and browser history', async ({ page, request }) => {
+  const { app } = (await queue(request))[0];
+  await page.goto('/admin/');
+  await page.getByRole('link', { name: 'Rust test app', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/admin/${app.appId}/$`));
+  await page.reload();
+  await expect(page.locator('#app-detail h1')).toHaveText(app.name);
+  await expect(page.locator('#error')).toBeHidden();
+  const preview = page.getByRole('link', { name: 'Preview listing' }).first();
+  expect(await preview.evaluate(link => new URL(link.href).pathname)).toMatch(/^\/admin\/preview\//);
+  await page.getByRole('link', { name: 'All apps' }).click();
+  await expect(page).toHaveURL(/\/admin\/$/);
+  await page.goBack();
+  await expect(page.locator('#app-detail h1')).toHaveText(app.name);
+  await page.goForward();
+  await expect(page.locator('#catalog-heading')).toBeVisible();
+  await page.goto(`/admin/${app.appId}/`);
+  await expect(page.locator('#app-detail h1')).toHaveText(app.name);
+  await page.goto(`/admin/${'0'.repeat(52)}/`);
+  await expect(page.locator('#app-detail h1')).toHaveText('App not found');
+  expect((await request.get(`/submitter/${app.appId}/`)).ok()).toBeFalsy();
+  expect((await request.get(`/admin/${app.appId}/extra`)).ok()).toBeFalsy();
+});
+
+test('Sandstorm shell URL follows app navigation and restores the iframe on reload', async ({ page, request }) => {
+  const { app } = (await queue(request))[0];
+  // Model the documented shell contract: forward the outer path on load and
+  // accept setPath messages from the grain iframe to update the address bar.
+  await page.route('**/shell/**', route => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><iframe id="grain" style="width:100%;height:900px"></iframe><script>
+      const grain = document.getElementById('grain');
+      grain.src = '/reviewer' + location.pathname.slice('/shell'.length);
+      window.addEventListener('message', event => {
+        if (event.source === grain.contentWindow && typeof event.data?.setPath === 'string') {
+          history.replaceState(null, '', '/shell' + event.data.setPath);
+        }
+      });
+    </script>`,
+  }));
+  await page.goto('/shell/');
+  const grain = page.frameLocator('#grain');
+  await grain.getByRole('link', { name: app.name, exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/shell/${app.appId}/$`));
+  await page.reload();
+  await expect(grain.locator('#app-detail h1')).toHaveText(app.name);
+  await expect(grain.locator('#error')).toBeHidden();
+  await grain.getByRole('link', { name: 'All apps' }).click();
+  await expect(page).toHaveURL(/\/shell\/$/);
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`/shell/${app.appId}/$`));
+  await expect(grain.locator('#app-detail h1')).toHaveText(app.name);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/shell\/$/);
+  await page.reload();
+  await expect(grain.locator('#catalog-heading')).toBeVisible();
 });

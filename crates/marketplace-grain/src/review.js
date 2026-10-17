@@ -1,4 +1,7 @@
 "use strict";
+function appIdFromPath(path) {
+  return /^\/([0123456789acdefghjkmnpqrstuvwxyz]{52})\/?$/.exec(path)?.[1] || null;
+}
 function awaitingReview(item) {
   return item.review === "pending" && item.requestState !== "ignore";
 }
@@ -89,6 +92,7 @@ function auditEventLabel(event) {
 }
 if (typeof module !== "undefined")
   module.exports = {
+    appIdFromPath,
     awaitingReview,
     groupApps,
     matches,
@@ -103,6 +107,16 @@ if (typeof module !== "undefined")
     auditEventLabel,
   };
 if (typeof document !== "undefined") {
+  // The script lives at the session root, including when loaded at an app URL.
+  const appBase = new URL(".", document.currentScript.src);
+  document.querySelector("base").href = appBase.href;
+  const currentPath = () => `/${location.pathname.slice(appBase.pathname.length)}`;
+  const currentAppId = () => appIdFromPath(currentPath());
+  function syncSandstormPath() {
+    if (window.parent !== window) {
+      window.parent.postMessage({ setPath: currentPath() + location.search + location.hash }, "*");
+    }
+  }
   const $ = (id) => document.getElementById(id);
   let items = [],
     page = 0,
@@ -126,7 +140,7 @@ if (typeof document !== "undefined") {
   }
   async function request(path, body) {
     const response = await fetch(
-      path,
+      new URL(path, appBase),
       body === undefined ? {} : { method: "POST", body },
     );
     if (!response.ok) throw new Error(await response.text());
@@ -323,21 +337,18 @@ if (typeof document !== "undefined") {
   }
   function appLink(item, label = item.app.name) {
     const link = element("a", label);
-    link.href = `#app/${encodeURIComponent(item.app.appId)}`;
+    link.href = new URL(`${encodeURIComponent(item.app.appId)}/`, appBase).href;
+    link.dataset.adminNavigation = "";
     return link;
   }
   function renderApp(groups) {
     const detail = $("app-detail");
     detail.replaceChildren();
     const back = element("a", "← All apps", "back");
-    back.href = "#";
+    back.href = appBase.href;
+    back.dataset.adminNavigation = "";
     detail.append(back);
-    let appId;
-    try {
-      appId = decodeURIComponent(location.hash.slice(5));
-    } catch {
-      appId = "";
-    }
+    const appId = currentAppId();
     const versions = groups.find((group) => group[0].app.appId === appId);
     if (!versions) {
       detail.append(
@@ -378,7 +389,8 @@ if (typeof document !== "undefined") {
         : "Active. This app appears in marketplace indexes when it has a public release."));
     if (item.app.deprecation?.replacementAppId) {
       const replacement = element("a", "View replacement app");
-      replacement.href = `#app/${encodeURIComponent(item.app.deprecation.replacementAppId)}`;
+      replacement.href = new URL(`${encodeURIComponent(item.app.deprecation.replacementAppId)}/`, appBase).href;
+      replacement.dataset.adminNavigation = "";
       deprecation.append(replacement);
     }
     if (canApprove) {
@@ -681,7 +693,7 @@ if (typeof document !== "undefined") {
       ),
     );
     const groups = publishedApps(items);
-    const showingApp = location.hash.startsWith("#app/");
+    const showingApp = !!currentAppId();
     $("catalog-heading").hidden = showingApp;
     $("catalog-view").hidden = showingApp;
     $("app-detail").hidden = !showingApp;
@@ -802,19 +814,27 @@ if (typeof document !== "undefined") {
       }
     });
   };
-  window.addEventListener("hashchange", () => {
+  function navigated() {
+    auditView = null;
     render();
-    const heading = document.querySelector(
-      location.hash.startsWith("#app/")
-        ? "#app-detail h1"
-        : "#catalog-heading h1",
-    );
+    syncSandstormPath();
+    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : "#catalog-heading h1");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
     }
     window.scrollTo(0, 0);
+  }
+  document.addEventListener("click", (event) => {
+    const link = event.target.closest("a[data-admin-navigation]");
+    if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey ||
+        event.ctrlKey || event.shiftKey || event.altKey || link.target || link.hasAttribute("download")) return;
+    event.preventDefault();
+    if (link.href !== location.href) history.pushState(null, "", link.href);
+    navigated();
   });
+  window.addEventListener("popstate", navigated);
+  syncSandstormPath();
   $("search").oninput = () => {
     page = 0;
     render();

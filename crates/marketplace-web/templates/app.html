@@ -29,7 +29,7 @@
     <main class="app-page">
       {% if let Some(deprecation) = app.deprecation %}
       <p class="deprecation-notice" role="status"><strong>This app is deprecated.</strong> It is no longer listed in the marketplace. Existing releases remain available to download.
-        {% if let Some(id) = deprecation.replacement_app_id %}<a href="{% if preview %}../#app/{{ id }}{% else %}/app/{{ id }}{% endif %}">View replacement app</a>.{% endif %}
+        {% if let Some(id) = deprecation.replacement_app_id %}<a href="{% if preview %}../{{ id }}/{% else %}/app/{{ id }}{% endif %}">View replacement app</a>.{% endif %}
       </p>
       {% endif %}
       {% if experimental %}<p class="preview-notice" role="status">Experimental release · Pending approval</p>{% endif %}

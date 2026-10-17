@@ -88,3 +88,12 @@ test('audit table and JSON share attribution filtering without changing stored e
   const approval = {action: 'approved', actor: {kind: 'sandstormIdentity', identityId: 'reviewer-id', displayName: 'Reviewer'}, details: {}};
   assert.deepEqual(admin.auditEventForDisplay(approval), approval);
 });
+
+test('admin app routes use only the app ID', () => {
+  const id = '0'.repeat(52);
+  assert.equal(admin.appIdFromPath(`/${id}/`), id);
+  assert.equal(admin.appIdFromPath(`/${id}`), id);
+  for (const path of ['/', '/admin', `/${id}/extra`, `/${id}-name/`, '/%invalid/', '/<script>/']) {
+    assert.equal(admin.appIdFromPath(path), null);
+  }
+});

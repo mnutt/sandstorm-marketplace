@@ -1,4 +1,9 @@
 "use strict";
+if (window.parent !== window) {
+  const base = new URL(".", document.currentScript.src);
+  const path = `/${location.pathname.slice(base.pathname.length)}`;
+  window.parent.postMessage({ setPath: path + location.search + location.hash }, "*");
+}
 const install = document.getElementById("preview-install");
 const dialog = document.getElementById("install-dialog");
 const error = document.getElementById("install-error");
