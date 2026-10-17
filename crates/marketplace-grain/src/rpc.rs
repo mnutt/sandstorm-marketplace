@@ -210,7 +210,12 @@ impl web::Server for Session {
                 );
                 let body = data.get_content()?;
                 ensure!(api || can_approve, "approval permission denied");
-                let operation = registry.begin_operation().await;
+                // Upload/import preparation does not touch live registry state.
+                let _operation = if (api && path == "upload") || (!api && path == "import") {
+                    None
+                } else {
+                    Some(registry.begin_operation().await)
+                };
                 if api {
                     match path {
                         "upload" => {
@@ -220,14 +225,8 @@ impl web::Server for Session {
                             );
                             let mut temp = registry.temporary()?;
                             temp.write_all(body)?;
-                            crate::work::upload(
-                                registry.clone(),
-                                platform.clone(),
-                                operation,
-                                temp,
-                                false,
-                            )
-                            .await?;
+                            crate::work::upload(registry.clone(), platform.clone(), temp, false)
+                                .await?;
                             results.get().init_no_content();
                         }
                         "status" => content(
@@ -249,14 +248,7 @@ impl web::Server for Session {
                         );
                         let mut temp = registry.temporary()?;
                         temp.write_all(body)?;
-                        crate::work::upload(
-                            registry.clone(),
-                            platform.clone(),
-                            operation,
-                            temp,
-                            true,
-                        )
-                        .await?;
+                        crate::work::upload(registry.clone(), platform.clone(), temp, true).await?;
                         results.get().init_no_content();
                     } else if path == "notifications" {
                         crate::notifications::configure(&registry, std::str::from_utf8(body)?)?;
@@ -445,8 +437,7 @@ impl byte_stream::Server for Upload {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "Upload received; processing"
                 );
-                let operation = registry.begin_operation().await;
-                crate::work::upload(registry, platform, operation, file, import).await?;
+                crate::work::upload(registry, platform, file, import).await?;
                 Ok(())
             }
             .await;

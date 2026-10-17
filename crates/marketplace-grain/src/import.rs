@@ -10,6 +10,11 @@ use std::{
 };
 
 pub const IMPORT_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
+pub(crate) struct PreparedImport {
+    _work: tempfile::TempDir,
+    staged: Registry,
+}
+
 impl Registry {
     pub fn import_catalog(&self, path: &Path) -> Result<()> {
         self.import_catalog_cancellable(path, &std::sync::atomic::AtomicBool::new(false))
@@ -20,7 +25,14 @@ impl Registry {
         path: &Path,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
-        let started = std::time::Instant::now();
+        let prepared = self.prepare_import(path, cancelled)?;
+        self.commit_import(prepared, cancelled)
+    }
+    pub(crate) fn prepare_import(
+        &self,
+        path: &Path,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<PreparedImport> {
         tracing::info!(bytes = fs::metadata(path)?.len(), "Starting catalog import");
         ensure!(
             self.package_ids()?.is_empty(),
@@ -152,8 +164,20 @@ impl Registry {
         tracing::info!("Validating publication in temporary storage");
         staged.publish()?;
         crate::work::check_cancelled(cancelled)?;
+        Ok(PreparedImport {
+            _work: work,
+            staged,
+        })
+    }
+    pub(crate) fn commit_import(
+        &self,
+        prepared: PreparedImport,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        crate::work::check_cancelled(cancelled)?;
+        let PreparedImport { _work, staged } = prepared;
         ensure!(self.package_ids()?.is_empty(), "grain is no longer empty");
-        tracing::info!(packages = listed.len(), "Committing imported packages");
+        tracing::info!("Committing imported packages");
         let mut events = Vec::new();
         let mut changes = Vec::new();
         for id in staged.package_ids()? {
@@ -194,11 +218,48 @@ impl Registry {
         crate::work::check_cancelled(cancelled)?;
         self.audit_commit(changes, events)?;
         self.publish()?;
-        tracing::info!(
-            packages = listed.len(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "Catalog import complete"
-        );
+        tracing::info!("Catalog import complete");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{Change, encode};
+
+    #[tokio::test]
+    async fn import_rechecks_empty_registry_before_installing_staged_packages() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let work = tempfile::tempdir_in(registry.root.join("tmp"))?;
+        let staged = Registry::new(work.path().join("registry"))?;
+        let prepared = PreparedImport {
+            _work: work,
+            staged,
+        };
+        let mut metadata = capnp::message::Builder::new_default();
+        metadata.init_root::<p::verified_info::Builder>();
+        let mut status = capnp::message::Builder::new_default();
+        status.init_root::<s::submission_status::Builder>();
+        let id = "00".repeat(16);
+        // A submission commits while the import is preparing.
+        let _operation = registry.begin_operation().await;
+        registry.database.commit(
+            vec![Change::Release {
+                id: id.clone(),
+                metadata: encode(&metadata)?,
+                status: encode(&status)?,
+                received_at: None,
+                ever_approved: false,
+            }],
+            Vec::new(),
+        )?;
+        let error = registry
+            .commit_import(prepared, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap_err();
+        assert!(error.to_string().contains("grain is no longer empty"));
+        assert_eq!(registry.package_ids()?, vec![id]);
         Ok(())
     }
 }

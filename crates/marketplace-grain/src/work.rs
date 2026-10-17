@@ -1,7 +1,7 @@
 //! Keep long uploads alive without blocking the single-threaded capability RPC loop.
 use crate::{
     activity_capnp::ongoing_notification,
-    registry::{Operation, Registry},
+    registry::Registry,
     rpc::{PlatformSlot, error},
 };
 use anyhow::{Result, ensure};
@@ -34,15 +34,17 @@ impl Drop for CancelOnDrop {
     }
 }
 
-async fn run<F>(
+async fn run<T, P, C>(
     registry: Registry,
     platform: PlatformSlot,
-    operation: Operation,
     import: bool,
-    task: F,
+    prepare: P,
+    commit: C,
 ) -> Result<()>
 where
-    F: FnOnce(Registry, &AtomicBool) -> Result<()> + Send + 'static,
+    T: Send + 'static,
+    P: FnOnce(Registry, &AtomicBool) -> Result<T> + Send + 'static,
+    C: FnOnce(Registry, T, &AtomicBool) -> Result<()> + Send + 'static,
 {
     let cancelled = Arc::new(AtomicBool::new(false));
     let _cancel_on_drop = CancelOnDrop(cancelled.clone());
@@ -73,20 +75,54 @@ where
     } else {
         None
     };
+    let started = std::time::Instant::now();
     let span = tracing::Span::current();
+    let preparation_registry = registry.clone();
+    let preparation_cancelled = cancelled.clone();
+    let preparation_span = span.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let _span = preparation_span.enter();
+        check_cancelled(&preparation_cancelled)?;
+        prepare(preparation_registry, &preparation_cancelled)
+    })
+    .await
+    .map_err(error)??;
+    tracing::info!(
+        import,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Preparation complete; waiting to commit"
+    );
+    // Dropping the RPC future cancels this wait immediately. Notification
+    // cancellation must also remove the waiter without waiting for the holder.
+    let queued = std::time::Instant::now();
+    let operation = tokio::select! {
+        operation = registry.begin_operation() => operation,
+        _ = async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        } => anyhow::bail!("operation cancelled"),
+    };
+    tracing::info!(
+        import,
+        wait_ms = queued.elapsed().as_millis() as u64,
+        "Registry gate acquired"
+    );
+    let committing = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
-        // The write gate stays held even if the RPC future is cancelled while
-        // the blocking task is finishing its cancellation/cleanup checks.
+        // Keep the gate even if the RPC is dropped during commit/cleanup.
         let _operation = operation;
         let _span = span.enter();
         check_cancelled(&cancelled)?;
-        task(registry, &cancelled)
+        commit(registry, prepared, &cancelled)
     })
     .await
     .map_err(error)?;
     drop(wake);
     tracing::info!(
         import,
+        commit_ms = committing.elapsed().as_millis() as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
         "Package processing finished; released Sandstorm wake handle"
     );
     result
@@ -95,26 +131,28 @@ where
 pub(crate) async fn upload(
     registry: Registry,
     platform: PlatformSlot,
-    operation: Operation,
     file: tempfile::NamedTempFile,
     import: bool,
 ) -> Result<()> {
-    run(
-        registry,
-        platform,
-        operation,
-        import,
-        move |registry, cancelled| {
-            if import {
-                registry.import_catalog_cancellable(file.path(), cancelled)
-            } else {
-                registry
-                    .upload_cancellable(file.path(), cancelled)
-                    .map(|_| ())
-            }
-        },
-    )
-    .await
+    if import {
+        run(
+            registry,
+            platform,
+            true,
+            move |registry, cancelled| registry.prepare_import(file.path(), cancelled),
+            |registry, prepared, cancelled| registry.commit_import(prepared, cancelled),
+        )
+        .await
+    } else {
+        run(
+            registry,
+            platform,
+            false,
+            move |registry, cancelled| registry.prepare_upload(file.path(), cancelled),
+            |registry, prepared, cancelled| registry.commit_upload(prepared, cancelled).map(|_| ()),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +218,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_while_waiting_does_not_commit_or_wait_for_the_gate() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let holder = registry.begin_operation().await;
+        let handles = Arc::new(AtomicUsize::new(0));
+        let notification = Rc::new(RefCell::new(None));
+        let platform = Rc::new(RefCell::new(Some(capnp_rpc::new_client(Platform {
+            handles: handles.clone(),
+            notification: notification.clone(),
+        }))));
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let job = run(
+            registry.clone(),
+            platform,
+            false,
+            move |_, _| {
+                prepared_tx.send(()).unwrap();
+                Ok(())
+            },
+            |_, (), _| panic!("canceled work must not commit"),
+        );
+        let cancel = async {
+            prepared_rx.await?;
+            let notification = notification.borrow().clone().unwrap();
+            notification.cancel_request().send().promise.await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let (result, cancel) = tokio::time::timeout(Duration::from_secs(2), async {
+            futures::join!(job, cancel)
+        })
+        .await?;
+        cancel?;
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(registry.is_busy());
+        drop(holder);
+        assert!(!registry.is_busy());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_rpc_keeps_gate_until_commit_worker_exits() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut job = Box::pin(run(
+            registry.clone(),
+            Rc::new(RefCell::new(None)),
+            false,
+            |_, _| Ok(()),
+            move |_, (), cancelled| {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5))?;
+                check_cancelled(cancelled)
+            },
+        ));
+        tokio::select! {
+            result = &mut job => panic!("worker finished early: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(2), started_rx) => { result??; }
+        }
+        drop(job);
+        assert!(registry.is_busy());
+        release_tx.send(())?;
+        let next = tokio::time::timeout(Duration::from_secs(2), registry.begin_operation()).await?;
+        drop(next);
+        assert!(!registry.is_busy());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn worker_keeps_grain_awake_and_rpc_responsive_and_honors_cancel() -> Result<()> {
         for cancel in [false, true] {
             let dir = tempfile::tempdir()?;
@@ -201,7 +309,6 @@ mod tests {
             let job = run(
                 registry.clone(),
                 platform,
-                registry.begin_operation().await,
                 true,
                 move |_, cancelled| {
                     ensure!(
@@ -212,15 +319,18 @@ mod tests {
                     release_rx.recv_timeout(Duration::from_secs(5))?;
                     check_cancelled(cancelled)
                 },
+                |registry, (), cancelled| {
+                    assert!(registry.is_busy());
+                    check_cancelled(cancelled)
+                },
             );
             let monitor = async {
                 tokio::time::timeout(Duration::from_secs(2), started_rx).await??;
-                assert!(registry.is_busy());
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(20), registry.begin_operation())
-                        .await
-                        .is_err()
-                );
+                assert!(!registry.is_busy());
+                let concurrent_operation =
+                    tokio::time::timeout(Duration::from_secs(1), registry.begin_operation())
+                        .await?;
+                drop(concurrent_operation);
                 // A real capability request must be serviced while the worker is blocked.
                 let response = tokio::time::timeout(
                     Duration::from_secs(2),

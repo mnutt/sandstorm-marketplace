@@ -94,6 +94,10 @@ pub struct Registry {
     pub(crate) actor: Actor,
     pub(crate) database: Arc<Database>,
 }
+pub(crate) struct PreparedUpload {
+    file: tempfile::NamedTempFile,
+    verified: Builder<capnp::message::HeapAllocator>,
+}
 pub(crate) type Operation = tokio::sync::OwnedMutexGuard<()>;
 impl Registry {
     pub fn new(root: PathBuf) -> Result<Self> {
@@ -146,18 +150,24 @@ impl Registry {
         upload: &Path,
         cancelled: &AtomicBool,
     ) -> Result<String> {
+        let prepared = self.prepare_upload(upload, cancelled)?;
+        self.commit_upload(prepared, cancelled)
+    }
+    pub(crate) fn prepare_upload(
+        &self,
+        upload: &Path,
+        cancelled: &AtomicBool,
+    ) -> Result<PreparedUpload> {
         crate::work::check_cancelled(cancelled)?;
-        let started = std::time::Instant::now();
-        tracing::info!(bytes = fs::metadata(upload)?.len(), "Verifying SPK");
-        let verified = spk::verify_in_cancellable(upload, &self.root.join("tmp"), cancelled)?;
+        // Own the exact bytes that are verified and eventually installed.
+        let mut file = self.temporary()?;
+        std::io::copy(&mut File::open(upload)?, &mut file)?;
+        file.as_file().sync_all()?;
+        crate::work::check_cancelled(cancelled)?;
+        tracing::info!(bytes = file.as_file().metadata()?.len(), "Verifying SPK");
+        let verified = spk::verify_in_cancellable(file.path(), &self.root.join("tmp"), cancelled)?;
         crate::work::check_cancelled(cancelled)?;
         let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
-        let id = hex::encode(ids::package_bytes(info.get_package_id()?));
-        let dest = self.package_dir(&id)?;
-        if self.database.contains(&id)? {
-            tracing::info!(package_id = %id, "Package already stored");
-            return Ok(id);
-        }
         let metadata = info.get_metadata()?;
         ensure!(
             !metadata
@@ -179,6 +189,23 @@ impl Registry {
         // Exercise the same metadata/image conversion used by publication before
         // committing the package. A valid signature does not imply valid text or enums.
         crate::catalog::parse(info, 0).context("invalid marketplace metadata")?;
+        Ok(PreparedUpload { file, verified })
+    }
+    // Caller holds the registry gate; all state-dependent checks happen here.
+    pub(crate) fn commit_upload(
+        &self,
+        prepared: PreparedUpload,
+        cancelled: &AtomicBool,
+    ) -> Result<String> {
+        crate::work::check_cancelled(cancelled)?;
+        let PreparedUpload { file, verified } = prepared;
+        let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
+        let id = hex::encode(ids::package_bytes(info.get_package_id()?));
+        let dest = self.package_dir(&id)?;
+        if self.database.contains(&id)? {
+            tracing::info!(package_id = %id, "Package already stored");
+            return Ok(id);
+        }
         let app = ids::app_bytes(info.get_app_id()?);
         // Check all previously published releases, including withdrawn versions.
         for previous in self.package_ids()? {
@@ -205,12 +232,7 @@ impl Registry {
         status.init_root::<s::submission_status::Builder>();
         // Install the immutable file before the database commit. A crash can leave
         // an unreferenced file, which a verified retry safely replaces.
-        let mut staged = tempfile::NamedTempFile::new_in(&dest)?;
-        std::io::copy(&mut File::open(upload)?, &mut staged)?;
-        staged.as_file().sync_all()?;
-        let (_, staged_path) = staged.keep()?;
-        File::open(&dest)?.sync_all()?;
-        fs::rename(staged_path, dest.join("spk"))?;
+        file.persist(dest.join("spk"))?;
         File::open(&dest)?.sync_all()?;
         File::open(self.root.join("packages"))?.sync_all()?;
         self.audit_commit(
@@ -229,7 +251,7 @@ impl Registry {
                 json!({"signatureVerified": true}),
             )],
         )?;
-        tracing::info!(package_id = %id, version = info.get_version(), elapsed_ms = started.elapsed().as_millis() as u64, "SPK verified and stored");
+        tracing::info!(package_id = %id, version = info.get_version(), "SPK verified and stored");
         Ok(id)
     }
     pub fn submission(&self, body: &[u8]) -> Result<Vec<u8>> {
@@ -984,4 +1006,61 @@ pub(crate) struct PublicVisibility {
     pub(crate) approved_listing: bool,
     pub(crate) experimental_listing: bool,
     pub(crate) download: bool,
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    fn prepared(registry: &Registry, version: u32) -> Result<PreparedUpload> {
+        let mut verified = Builder::new_default();
+        let mut info = verified.init_root::<p::verified_info::Builder>();
+        ids::set_app(info.reborrow().init_app_id(), &[42; 32]);
+        ids::set_package(info.reborrow().init_package_id(), &[version as u8; 16]);
+        info.set_version(version);
+        let mut file = registry.temporary()?;
+        file.write_all(b"already verified package")?;
+        Ok(PreparedUpload { file, verified })
+    }
+
+    #[tokio::test]
+    async fn upload_commit_rechecks_duplicates_versions_and_cancellation() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let cancelled = AtomicBool::new(false);
+        let older = prepared(&registry, 1)?;
+        let newer = prepared(&registry, 2)?;
+        let duplicate = prepared(&registry, 2)?;
+        let _operation = registry.begin_operation().await;
+        let id = registry.commit_upload(newer, &cancelled)?;
+        registry.mutate(&id, |mut status| {
+            status.set_publish_date(1);
+            Ok(())
+        })?;
+        assert_eq!(registry.commit_upload(duplicate, &cancelled)?, id);
+        assert!(
+            registry
+                .commit_upload(older, &cancelled)
+                .unwrap_err()
+                .to_string()
+                .contains("appVersion must exceed")
+        );
+        let next = prepared(&registry, 3)?;
+        assert!(
+            registry
+                .commit_upload(next, &AtomicBool::new(true))
+                .is_err()
+        );
+        assert_eq!(registry.package_ids()?, vec![id]);
+        let events = registry.audit_page(&ids::app_id(&[42; 32]), None)?;
+        assert_eq!(
+            events
+                .events
+                .iter()
+                .filter(|event| event.action == "submitted")
+                .count(),
+            1
+        );
+        Ok(())
+    }
 }

@@ -347,12 +347,15 @@ exposes a partially built site. Failed installation restores the previous site;
 an interrupted swap is recovered on the next publication attempt before rendering.
 Failed rendering leaves the previous site intact. Retrying the operation or restarting the grain rebuilds from persisted state. Registry mutations are
 serialized; this implementation rebuilds the full site per change. Upload
-verification and catalog imports run on a worker thread so capability RPC remains
-responsive. During processing, the grain holds a Sandstorm `stayAwake` handle,
+verification, file staging, and import validation run on worker threads outside
+the registry gate, so other submissions and reviews can proceed. Before installing
+files and committing, the worker acquires the gate and rechecks current state
+(including duplicate packages, published versions, and the empty-grain import
+requirement). Publication remains inside the gate. During processing, the grain holds a Sandstorm `stayAwake` handle,
 shown as an ongoing notification, and releases it when processing finishes.
 Canceling that notification stops processing at cancellation checkpoints; imports
 check cancellation before committing their staged packages. Overlapping write
-requests wait asynchronously in arrival order for the registry gate, rather than
+requests wait asynchronously in the order they reach the registry gate, rather than
 failing because it is busy. Canceling a waiting request removes it from the queue;
 an active worker retains the gate until its cancellation and cleanup finish.
 Static output is a snapshot: a browser spanning two publications can still see
