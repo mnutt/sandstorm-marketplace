@@ -12,8 +12,8 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub const APP_VERSION: u32 = 4;
-pub const MARKETING_VERSION: &str = "0.2.0";
+pub const APP_VERSION: u32 = 5;
+pub const MARKETING_VERSION: &str = "0.3.0";
 
 pub struct Release {
     pub test_key: bool,
