@@ -49,8 +49,40 @@ pub fn package_with_key(
             .reborrow()
             .init_description()
             .set_default_text(&format!(
-                "A signed integration-test package. Description for build {version}."
+                "A signed integration-test package. Description for build {version}.\n\n- **Features** with `code` and [documentation](https://example.org).\n\n<script>window.descriptionInjected = true</script>\n\n![tracker](/description-track) [unsafe](javascript:alert(1))"
             ));
+        if version > 1 {
+            let mut changelog =
+                format!("## Build {version}\n\n- **Improved** sync for build {version}.\n");
+            if version >= 3 {
+                for old in 1..=15 {
+                    changelog.push_str(&format!(
+                        "\n## Earlier release {old}\n\n- Historical change {old}.\n"
+                    ));
+                }
+            }
+            if version >= 3 {
+                changelog.push_str(
+                    r#"
+<script>window.changelogInjected = true</script>
+
+<img src="/changelog-track" onerror="window.changelogInjected = true">
+
+![tracker](/changelog-track)
+
+[bad](javascript:alert(1)) [encoded](jav&#x61;script:alert(1)) [data](data:text/html,test)
+
+[quote](https://example.org/"onclick="alert(1))
+
+<svg onload="window.changelogInjected = true"></svg>
+"#,
+                );
+            }
+            metadata
+                .reborrow()
+                .init_change_log()
+                .set_default_text(&changelog);
+        }
         metadata.reborrow().init_categories(1).set(
             0,
             if version == 3 {

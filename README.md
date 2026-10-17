@@ -151,6 +151,21 @@ and App Index URL to the public site URL in the server's configuration.
 /packages/<packageId>      signed SPK downloads
 ```
 
+### Listing descriptions and changelogs
+
+Public app pages and private listing previews display the selected package's
+`metadata.changeLog` below its description. Empty changelogs are omitted. Short
+changelogs appear in full; longer ones show the first 12 source lines or 1,200
+characters with an expandable full view that works without JavaScript. The view
+does not infer release boundaries or assume a particular heading format.
+
+Descriptions and changelogs share a small Markdown subset: headings, paragraphs, lists,
+emphasis, code, block quotes, and HTTP/HTTPS links. The parser's HTML renderer
+and optional extensions are disabled. The application emits fixed HTML tags,
+escapes author text and link destinations, and omits images and unsafe link
+schemes. Raw HTML appears as text. Parsing is limited to 512 KiB with a visible
+notice for larger content, and rendered nesting is limited to 64 levels.
+
 ## Reviewing submissions and managing versions
 
 The administration page opens on a table of **Existing apps**, ordered by the

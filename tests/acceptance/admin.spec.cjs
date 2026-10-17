@@ -56,6 +56,12 @@ test('reviewers download embargoed packages but cannot approve or expose them pu
   await expect(page.getByRole('status')).toContainText('Private listing preview · Build 4');
   await expect(page.getByRole('heading', { name: 'Description', exact: true })).toBeVisible();
   await expect(page.locator('.description-body')).toContainText('A signed integration-test package.');
+  await expect(page.locator('.description-body li strong')).toHaveText('Features');
+  await expect(page.locator('.description-body code')).toHaveText('code');
+  await expect(page.locator('.description-body a')).toHaveAttribute('href', 'https://example.org');
+  await expect(page.locator('.description-body')).toContainText('<script>');
+  await expect(page.locator('.description-body script, .description-body img')).toHaveCount(0);
+  expect(await page.evaluate(() => window.descriptionInjected)).toBeUndefined();
   await expect(page.locator('.icon')).toHaveAttribute('src', /^data:image\/svg\+xml;base64,/);
   await expect(page.locator('.shots img')).toHaveAttribute('src', /^data:image\/png;base64,/);
   await expect.poll(() => page.locator('.shots img').evaluate(img => img.complete && img.naturalWidth > 0)).toBe(true);
@@ -380,4 +386,47 @@ test('submission notification recipient defaults to unset and is approver-only',
   await expect(page.locator('#notification-status')).toHaveText('Email notifications are disabled.');
   await page.goto('/reviewer/');
   await expect(page.locator('#notifications')).toBeHidden();
+});
+
+test('listing changelogs show the selected build and expand without crowding reviews', async ({ page, request }) => {
+  const rows = await queue(request);
+  const appId = rows[0].app.appId;
+  const preview = version => `/admin/preview/${rows.find(row => row.app.versionNumber === version).app.packageId}`;
+  await page.goto(`/app/${appId}`);
+  await expect(page.getByRole('heading', { name: 'Changelog', exact: true })).toBeVisible();
+  const headingStyles = await page.locator('.description > h2, .changelog > h2').evaluateAll(headings =>
+    headings.map(heading => {
+      const style = getComputedStyle(heading);
+      return [style.fontSize, style.fontWeight, style.lineHeight, style.marginTop, style.marginBottom];
+    }));
+  expect(headingStyles).toHaveLength(2);
+  expect(headingStyles[1]).toEqual(headingStyles[0]);
+  await expect(page.locator('.changelog-body')).toContainText('Improved sync for build 2.');
+  await expect(page.locator('.changelog-body strong')).toHaveText('Improved');
+  await expect(page.locator('.changelog-full')).toHaveCount(0);
+  const details = await (await request.get(`/public/apps/${appId}.json`)).json();
+  expect(details.changeLog).toContain('## Build 2');
+  expect(JSON.stringify(details)).not.toContain('## Build 4');
+
+  for (const [url, build] of [[`/app/${appId}?experimental=true`, 3], [preview(4), 4]]) {
+    await page.goto(url);
+    await expect(page.locator('.changelog-excerpt')).toContainText(`Improved sync for build ${build}.`);
+    await expect(page.locator('.changelog-full .changelog-body')).toBeHidden();
+    await page.getByText('Show full changelog', { exact: true }).click();
+    await expect(page.locator('.changelog-excerpt')).toBeHidden();
+    await expect(page.locator('.changelog-full .changelog-body')).toContainText('Historical change 15.');
+    expect(await page.evaluate(() => window.changelogInjected)).toBeUndefined();
+    const safe = await page.locator('.changelog-full .changelog-body').evaluate(body =>
+      [...body.querySelectorAll('*')].every(node =>
+        ['P', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'EM', 'STRONG', 'BLOCKQUOTE', 'PRE', 'CODE', 'A', 'BR', 'HR'].includes(node.tagName) &&
+        [...node.attributes].every(attr => node.tagName === 'A' && ['href', 'rel'].includes(attr.name)) &&
+        (node.tagName !== 'A' || ['http:', 'https:'].includes(new URL(node.href).protocol))));
+    expect(safe).toBeTruthy();
+    await expect(page.locator('.changelog img, .changelog script, .changelog svg')).toHaveCount(0);
+    await page.getByText('Show less', { exact: true }).click();
+    await expect(page.locator('.changelog-excerpt')).toBeVisible();
+    await expect(page.locator('.changelog-full .changelog-body')).toBeHidden();
+  }
+  await page.goto(preview(1));
+  await expect(page.locator('.changelog')).toHaveCount(0);
 });

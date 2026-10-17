@@ -739,6 +739,7 @@ impl Registry {
                     },
                     AppDetailsForMarket {
                         description: String::new(),
+                        change_log: String::new(),
                         screenshots: Vec::new(),
                         license: String::new(),
                     },

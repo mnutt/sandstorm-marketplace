@@ -76,6 +76,8 @@ struct AppTemplate<'a> {
     website_url: String,
     source_url: String,
     description_html: String,
+    changelog_html: String,
+    changelog_excerpt_html: Option<String>,
 }
 
 struct ListingScreenshot {
@@ -213,7 +215,9 @@ fn app_template<'a>(app: &'a AppSummary, details: &'a AppDetailsForMarket) -> Ap
         report_issue_url: report_issue_url(app),
         website_url: safe_web_url(&app.web_link),
         source_url: safe_web_url(&app.code_link),
-        description_html: render_description_html(&details.description),
+        description_html: render_markdown(&details.description),
+        changelog_html: render_markdown(&details.change_log),
+        changelog_excerpt_html: changelog_excerpt(&details.change_log).map(render_markdown),
     }
 }
 
@@ -402,48 +406,93 @@ fn report_issue_url(app: &AppSummary) -> Option<String> {
     }
 }
 
-fn render_description_html(input: &str) -> String {
-    let mut html = String::new();
-    let mut paragraph = Vec::new();
-
-    let flush_paragraph = |paragraph: &mut Vec<String>, html: &mut String| {
-        if !paragraph.is_empty() {
-            let text = paragraph.join(" ");
-            html.push_str("<p>");
-            html.push_str(&escape_html(&text));
-            html.push_str("</p>");
-            paragraph.clear();
+// Bound both line count and characters: some packages use very long single-line paragraphs.
+fn changelog_excerpt(input: &str) -> Option<&str> {
+    let input = input.trim();
+    let mut lines = 0;
+    for (characters, (offset, character)) in input.char_indices().enumerate() {
+        if characters >= 1200 || lines >= 12 {
+            return Some(input[..offset].trim_end());
         }
-    };
-
-    for line in input.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            flush_paragraph(&mut paragraph, &mut html);
-            continue;
+        if character == '\n' {
+            lines += 1;
         }
-
-        if let Some(heading) = trimmed.strip_prefix("# ") {
-            flush_paragraph(&mut paragraph, &mut html);
-            html.push_str("<h3>");
-            html.push_str(&escape_html(heading));
-            html.push_str("</h3>");
-            continue;
-        }
-
-        if let Some(heading) = trimmed.strip_prefix("## ") {
-            flush_paragraph(&mut paragraph, &mut html);
-            html.push_str("<h4>");
-            html.push_str(&escape_html(heading));
-            html.push_str("</h4>");
-            continue;
-        }
-
-        paragraph.push(trimmed.to_string());
     }
+    None
+}
 
-    flush_paragraph(&mut paragraph, &mut html);
-    html
+fn render_markdown(input: &str) -> String {
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
+    // Limit parser work and rendered DOM size even for unusually large package metadata.
+    const MAX_SOURCE_BYTES: usize = 512 * 1024;
+    let mut end = input.len().min(MAX_SOURCE_BYTES);
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < input.len();
+    let input = &input[..end];
+    let mut output = String::new();
+    let mut endings = Vec::new();
+    // Intentionally do not use the library's HTML renderer. Only these fixed tags
+    // and one validated, escaped href can reach the template's `safe` insertion.
+    // Optional Markdown extensions, author HTML/attributes and images are disabled.
+    for event in Parser::new(input.trim()) {
+        match event {
+            Event::Start(tag) => {
+                if endings.len() >= 64 {
+                    endings.push("");
+                    continue;
+                }
+                let (open, close) = match tag {
+                    Tag::Paragraph => ("<p>", "</p>"),
+                    Tag::Heading { level, .. } => match level {
+                        HeadingLevel::H1 => ("<h3>", "</h3>"),
+                        HeadingLevel::H2 => ("<h4>", "</h4>"),
+                        HeadingLevel::H3 => ("<h5>", "</h5>"),
+                        _ => ("<h6>", "</h6>"),
+                    },
+                    Tag::List(Some(_)) => ("<ol>", "</ol>"),
+                    Tag::List(None) => ("<ul>", "</ul>"),
+                    Tag::Item => ("<li>", "</li>"),
+                    Tag::Emphasis => ("<em>", "</em>"),
+                    Tag::Strong => ("<strong>", "</strong>"),
+                    Tag::BlockQuote(_) => ("<blockquote>", "</blockquote>"),
+                    Tag::CodeBlock(_) => ("<pre><code>", "</code></pre>"),
+                    Tag::Link { dest_url, .. } => {
+                        let url = safe_web_url(&dest_url);
+                        if url.is_empty() || url.chars().any(char::is_control) {
+                            ("", "")
+                        } else {
+                            output.push_str("<a href=\"");
+                            output.push_str(&escape_html(&url));
+                            output.push_str("\" rel=\"nofollow noreferrer noopener\">");
+                            ("", "</a>")
+                        }
+                    }
+                    _ => ("", ""),
+                };
+                output.push_str(open);
+                endings.push(close);
+            }
+            Event::End(_) => output.push_str(endings.pop().unwrap_or_default()),
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                output.push_str(&escape_html(&text));
+            }
+            Event::Code(text) => {
+                output.push_str("<code>");
+                output.push_str(&escape_html(&text));
+                output.push_str("</code>");
+            }
+            Event::SoftBreak => output.push('\n'),
+            Event::HardBreak => output.push_str("<br>"),
+            Event::Rule => output.push_str("<hr>"),
+            _ => {}
+        }
+    }
+    if truncated {
+        output.push_str("<p>This content is too long to display in full.</p>");
+    }
+    output
 }
 
 fn escape_html(input: &str) -> String {
@@ -463,6 +512,60 @@ fn init_tracing() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn changelog_excerpts_are_bounded_and_unicode_safe() {
+        assert!(changelog_excerpt("").is_none());
+        assert!(changelog_excerpt("# 1.0\n\n- Short change").is_none());
+        let long = "é".repeat(1201);
+        assert_eq!(changelog_excerpt(&long).unwrap().chars().count(), 1200);
+        let lines = (0..20)
+            .map(|n| format!("- Change {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(changelog_excerpt(&lines).unwrap().lines().count(), 12);
+    }
+
+    #[test]
+    fn empty_rendered_excerpt_keeps_long_changelog_collapsed() {
+        let app: AppSummary = serde_json::from_value(serde_json::json!({
+            "appId": "test", "name": "Test", "version": "1.0", "versionNumber": 1,
+            "packageId": "test", "isOpenSource": true
+        }))
+        .unwrap();
+        let details: AppDetailsForMarket = serde_json::from_value(serde_json::json!({
+            "changeLog": format!("{}\nChanges below the definitions.", "[ref]: https://example.org\n".repeat(12))
+        }))
+        .unwrap();
+        let template = app_template(&app, &details);
+        assert_eq!(template.changelog_excerpt_html.as_deref(), Some(""));
+        let html = template.render().unwrap();
+        assert!(html.contains("<details class=\"changelog-full\">"));
+        assert!(html.contains("Changes below the definitions."));
+    }
+
+    #[test]
+    fn changelog_markdown_formats_changes_without_active_content() {
+        let html = render_markdown(
+            "# v2\n\n- **Fixed** sync\n\n## v1\n\n[Notes](https://example.org)\n\n<script>alert(1)</script>\n\n[bad](javascript:alert(1))\n\n![tracker](https://example.org/track.png)",
+        );
+        assert!(html.contains("<h3>v2</h3>"));
+        assert!(html.contains("<h4>v1</h4>"));
+        assert!(html.contains("<li><strong>Fixed</strong> sync</li>"));
+        assert!(html.contains("href=\"https://example.org\""));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("javascript:"));
+        assert!(!html.contains("<img"));
+    }
+
+    #[test]
+    fn oversized_changelogs_are_bounded_without_splitting_unicode() {
+        let html = render_markdown(&"é".repeat(400_000));
+        assert!(html.contains("too long to display in full"));
+        assert!(html.len() < 513 * 1024);
+        let html = render_markdown(&format!("{}text", "> ".repeat(1000)));
+        assert!(html.matches("<blockquote>").count() <= 64);
+    }
 
     #[test]
     fn category_links_encode_path_segments_and_preserve_search() {

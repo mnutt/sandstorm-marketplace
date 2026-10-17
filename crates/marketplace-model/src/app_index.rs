@@ -70,6 +70,8 @@ pub struct AuthorIdentity {
 pub struct AppDetailsForMarket {
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub change_log: String,
     #[serde(default)]
     pub screenshots: Vec<Screenshot>,
     #[serde(default)]

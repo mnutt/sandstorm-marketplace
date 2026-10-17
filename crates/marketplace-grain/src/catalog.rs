@@ -156,6 +156,11 @@ pub(crate) fn parse<'a>(info: p::verified_info::Reader<'a>, published: i64) -> R
                 .get_default_text()?
                 .to_str()?
                 .to_string(),
+            change_log: meta
+                .get_change_log()?
+                .get_default_text()?
+                .to_str()?
+                .to_string(),
             screenshots,
             license,
         },

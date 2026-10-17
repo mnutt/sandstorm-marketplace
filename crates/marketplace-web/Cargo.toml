@@ -18,3 +18,4 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tempfile = "3"
+pulldown-cmark = { version = "0.13", default-features = false }
