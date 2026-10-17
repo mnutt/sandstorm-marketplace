@@ -38,6 +38,7 @@ pub struct ReviewRelease {
     pub current: bool,
     pub pinned_package_id: String,
     pub public_download: bool,
+    pub public_page: bool,
     pub received_at: Option<String>,
     pub published_at: i64,
     pub app: AppSummary,
@@ -757,6 +758,18 @@ impl Registry {
                 current,
                 pinned_package_id: release.pin.clone(),
                 public_download: self.root.join("www/packages").join(&id).is_file(),
+                // Experimental-only pages also have HTML, but no approved app details.
+                public_page: self
+                    .installed_directory()
+                    .join("apps")
+                    .join(format!("{}.json", app.app_id))
+                    .is_file()
+                    && self
+                        .installed_directory()
+                        .join("app")
+                        .join(&app.app_id)
+                        .join("index.html")
+                        .is_file(),
                 received_at,
                 published_at: status.get_publish_date(),
                 app,

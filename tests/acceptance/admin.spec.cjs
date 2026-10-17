@@ -290,6 +290,10 @@ test('app paths survive direct loads, reloads, and browser history', async ({ pa
   await expect(page.locator('#app-detail h1')).toHaveText(app.name);
   await expect(page.locator('#error')).toBeHidden();
   await expect(page.locator('.app-icon')).toBeVisible();
+  const publicPage = page.getByRole('link', { name: 'Public Page', exact: true });
+  await expect(publicPage).toHaveAttribute('href', `http://127.0.0.1:9940/public/app/${app.appId}/`);
+  await expect(publicPage).toHaveAttribute('target', '_blank');
+  expect((await request.get(await publicPage.getAttribute('href'))).ok()).toBeTruthy();
   const preview = page.getByRole('link', { name: 'Preview listing' }).first();
   expect(await preview.evaluate(link => new URL(link.href).pathname)).toMatch(/^\/admin\/preview\//);
   await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
@@ -338,4 +342,21 @@ test('Sandstorm shell URL follows app navigation and restores the iframe on relo
   await expect(page).toHaveURL(/\/shell\/$/);
   await page.reload();
   await expect(grain.locator('#catalog-heading')).toBeVisible();
+});
+
+
+test('Public Page is hidden when only experimental releases remain', async ({ page, request }) => {
+  const rows = await queue(request);
+  const appId = rows[0].app.appId;
+  await page.goto(`/admin/${appId}/`);
+  await expect(page.getByRole('link', { name: 'Public Page', exact: true })).toBeVisible();
+  await expect(page.locator('.deprecation-controls')).toContainText('Not deprecated.');
+  for (const row of rows.filter(row => row.review === 'approved')) {
+    expect((await request.post(`/admin/unapprove/${row.app.packageId}`, { data: '' })).ok()).toBeTruthy();
+  }
+  // The experimental version still produces a public HTML page, but no approved version.
+  expect((await request.get(`/public/app/${appId}/`)).ok()).toBeTruthy();
+  await page.reload();
+  await expect(page.locator('.app-info')).toContainText('No approved public version.');
+  await expect(page.getByRole('link', { name: 'Public Page', exact: true })).toHaveCount(0);
 });

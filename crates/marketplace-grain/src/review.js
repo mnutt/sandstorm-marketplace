@@ -127,6 +127,7 @@ if (typeof document !== "undefined") {
     decision = null;
   const pageSize = 25;
   let auditView = null;
+  let publicBase = null;
 
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -371,6 +372,13 @@ if (typeof document !== "undefined") {
       json(`icon/${encodeURIComponent(item.app.packageId)}`).then(url => {
         if (url) { icon.src = url; icon.hidden = false; }
       }).catch(() => {});
+    }
+    if (item.publicPage && publicBase) {
+      const link = element("a", "Public Page");
+      link.href = new URL(`app/${encodeURIComponent(appId)}/`, publicBase).href;
+      link.target = "_blank";
+      link.rel = "noopener";
+      sidebar.append(link);
     }
     info.append(infoBody);
     if (sidebar.childElementCount) info.append(sidebar);
@@ -871,6 +879,8 @@ if (typeof document !== "undefined") {
     .then((info) => {
       const url = new URL(info.autoUrl);
       if (!["https:", "http:"].includes(url.protocol)) return;
+      if (!url.pathname.endsWith("/")) url.pathname += "/";
+      publicBase = url;
       $("public-url").href = url.href;
       $("public-url").hidden = false;
       render();

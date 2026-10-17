@@ -746,6 +746,16 @@ fn experimental_updates_require_approval_history_and_stay_author_controlled() ->
     registry.submission(&request(&first, Some(s::SubmissionState::Review), 2))?;
     registry.review(&first, "approve", "")?;
     assert_eq!(experimental()?["apps"][0]["packageId"], next);
+    // An experimental page alone must not advertise an approved public page.
+    let app_id = ids::app_id(key().verifying_key().as_bytes());
+    assert!(
+        dir.path()
+            .join("www/app")
+            .join(&app_id)
+            .join("index.html")
+            .is_file()
+    );
+    assert!(registry.queue()?.iter().all(|release| !release.public_page));
     registry.review(&first, "reject", "Withdrawn approval")?;
     let reopened = Registry::new(dir.path().to_owned())?;
     reopened.publish()?;
