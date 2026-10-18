@@ -340,6 +340,11 @@ The grain stores SPKs under `/var/packages` and metadata in `/var/marketplace.sq
 private catalog under `/var/catalog`, and calls the publisher library after state
 changes. The publisher stages a complete replacement next to `/var/www`, then
 uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations when available.
+The intermediate catalog is rebuildable scratch data. After writing the entire
+public stage, the publisher flushes file contents with `fdatasync` and syncs each
+directory once, children before parents, before installing the generation.
+SQLite transactions, uploaded SPKs, and the final swap retain their durability
+barriers; no cache or incremental-rendering state is required.
 When Sandstorm or the filesystem does not support directory exchange, publication
 uses ordinary renames with a saved previous generation. This fallback has a brief
 interval where public requests may return a missing-page response, but never

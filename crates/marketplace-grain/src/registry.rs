@@ -16,7 +16,6 @@ use serde_json::json;
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -594,6 +593,8 @@ impl Registry {
         let overrides = self.description_overrides()?;
         let deprecations = self.deprecations()?;
         tracing::info!(packages = releases.len(), "Rebuilding public catalog");
+        // Rebuildable scratch data: the publisher flushes the completed public
+        // tree before installing it. No intermediate per-file barriers are needed.
         let catalog = self.root.join("catalog");
         if catalog.exists() {
             fs::remove_dir_all(&catalog)?;
@@ -652,14 +653,14 @@ impl Registry {
                 if let Some(description) = overrides.get(&app.app_id) {
                     app.short_description = description.clone();
                 }
-                atomic_write(
+                fs::write(
                     &catalog.join(directory).join(format!("{}.json", app.app_id)),
                     &serde_json::to_vec(&details)?,
                 )?;
                 apps.push(app);
             }
             apps.sort_by(|a, b| a.name.cmp(&b.name));
-            atomic_write(
+            fs::write(
                 &catalog.join(directory).join("index.json"),
                 &serde_json::to_vec(&AppIndexForMarket { apps })?,
             )?;
@@ -860,16 +861,6 @@ impl Registry {
         })
     }
 }
-pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let parent = path.parent().context("missing parent directory")?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(data)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
 pub(crate) fn audit_status(status: s::submission_status::Reader<'_>) -> Result<serde_json::Value> {
     let (review, reason) = match status.which()? {
         s::submission_status::Approved(_) => ("approved", ""),
@@ -1011,6 +1002,7 @@ pub(crate) struct PublicVisibility {
 #[cfg(test)]
 mod upload_tests {
     use super::*;
+    use std::io::Write;
 
     fn prepared(registry: &Registry, version: u32) -> Result<PreparedUpload> {
         let mut verified = Builder::new_default();

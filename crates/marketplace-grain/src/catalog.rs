@@ -1,5 +1,5 @@
 //! Convert verified package metadata without reading or writing registry files.
-use crate::{ids, package_capnp as p, registry::atomic_write};
+use crate::{ids, package_capnp as p};
 use anyhow::{Context, Result, bail};
 use marketplace_model::app_index::{AppDetailsForMarket, AppSummary, Screenshot};
 use sha2::Digest;
@@ -49,7 +49,7 @@ impl Entry<'_> {
         for asset in &self.assets {
             let path = catalog.join("images").join(&asset.name);
             if !path.exists() {
-                atomic_write(&path, asset.data)?;
+                std::fs::write(&path, asset.data)?;
             }
         }
         Ok(())

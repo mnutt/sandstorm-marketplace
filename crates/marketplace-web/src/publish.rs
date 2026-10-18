@@ -81,10 +81,21 @@ fn publish_generation_inner(
         fs::remove_dir_all(&stage)?;
     }
     fs::create_dir(&stage)?;
+    let started = std::time::Instant::now();
     let result = build(&source, &stage, package_base).and_then(|()| {
         if let Some(generation) = generation {
-            write(&stage.join("generation.txt"), generation.to_string())?;
+            fs::write(&stage.join("generation.txt"), generation.to_string())?;
         }
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Public stage written"
+        );
+        let flushing = std::time::Instant::now();
+        sync_tree(&stage)?;
+        tracing::info!(
+            elapsed_ms = flushing.elapsed().as_millis() as u64,
+            "Public stage flushed"
+        );
         commit(&stage, &output)
     });
     if stage.exists() {
@@ -167,7 +178,7 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
         };
         let directory = stage.join("app").join(&app.app_id);
         fs::create_dir_all(&directory)?;
-        write(&directory.join("index.html"), page)?;
+        fs::write(&directory.join("index.html"), page)?;
     }
     // Index files were hard-linked from the source. Unlink before rewriting so
     // filtering discovery cannot mutate the catalog used to build direct pages.
@@ -181,20 +192,20 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
     let mut index = index;
     index.index.apps.retain(|app| app.deprecation.is_none());
     updates.index.apps.retain(|app| app.deprecation.is_none());
-    write(
+    fs::write(
         &stage.join("apps/index.json"),
         serde_json::to_vec(&index.index)?,
     )?;
     fs::create_dir_all(stage.join("experimental"))?;
-    write(
+    fs::write(
         &stage.join("experimental/index.json"),
         serde_json::to_vec(&updates.index)?,
     )?;
-    write(
+    fs::write(
         &stage.join("marketplace.js"),
         include_str!("../static/marketplace.js"),
     )?;
-    write(
+    fs::write(
         &stage.join("index.html"),
         with_experimental(
             home(&index, None, base, false)?,
@@ -215,7 +226,7 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
         );
         let directory = stage.join("genre").join(&name);
         fs::create_dir_all(&directory)?;
-        write(
+        fs::write(
             &directory.join("index.html"),
             with_experimental(
                 home(&index, Some(name), base, false)?,
@@ -223,17 +234,10 @@ fn build(source: &Path, stage: &Path, package_base: Option<&str>) -> Result<()> 
             )?,
         )?;
     }
-    if stage.join("genre").exists() {
-        fs::File::open(stage.join("genre"))?.sync_all()?;
-    }
     fs::create_dir(stage.join("assets"))?;
     for asset in crate::assets::ASSETS {
-        write(&stage.join("assets").join(asset.name), asset.bytes)?;
+        fs::write(&stage.join("assets").join(asset.name), asset.bytes)?;
     }
-    if stage.join("app").exists() {
-        fs::File::open(stage.join("app"))?.sync_all()?;
-    }
-    fs::File::open(stage)?.sync_all()?;
     Ok(())
 }
 
@@ -348,16 +352,27 @@ fn copy_flat_directory(source: &Path, dest: &Path) -> Result<()> {
         if fs::hard_link(entry.path(), &target).is_err() {
             fs::copy(entry.path(), &target)?;
         }
-        fs::File::open(target)?.sync_all()?;
     }
-    fs::File::open(dest)?.sync_all()?;
     Ok(())
 }
 
-fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    fs::write(path, contents)?;
-    fs::File::open(path)?.sync_all()?;
-    fs::File::open(path.parent().context("file parent")?)?.sync_all()?;
+// Flush only after all writes are complete. sync_data covers file contents and
+// metadata needed to read them, without forcing unrelated inode changes (such as
+// hard-link counts) to disk for every immutable image or SPK. Directory fsyncs
+// persist the names, once per directory, children before parents. This also
+// handles caller-provided catalogs whose files have not already been flushed.
+fn sync_tree(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            sync_tree(&entry.path())?;
+        } else {
+            ensure!(kind.is_file(), "publication contains a non-regular file");
+            fs::File::open(entry.path())?.sync_data()?;
+        }
+    }
+    fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -446,7 +461,10 @@ mod tests {
             copy_flat_directory(&fixtures.join(dir), &source.join(dir))?;
         }
         let output = temp.path().join("www");
-        publish(&source, &output)?;
+        let source_index = fs::read(source.join("apps/index.json"))?;
+        publish_generation(&source, &output, 1)?;
+        assert_eq!(fs::read_to_string(output.join("generation.txt"))?, "1");
+        assert_eq!(fs::read(source.join("apps/index.json"))?, source_index);
         let original = fs::read(output.join("index.html"))?;
         assert!(String::from_utf8_lossy(&original).contains("Etherpad"));
         assert!(String::from_utf8_lossy(&original).contains("/assets/marketplace.css"));
@@ -466,15 +484,17 @@ mod tests {
         let app_id = LoadedAppIndex::load(&source)?.index.apps[0].app_id.clone();
         assert!(output.join(format!("app/{app_id}/index.html")).is_file());
         fs::remove_file(source.join("packages/pkg-etherpad-0001"))?;
-        assert!(publish(&source, &output).is_err());
+        assert!(publish_generation(&source, &output, 2).is_err());
         assert_eq!(fs::read(output.join("index.html"))?, original);
+        assert_eq!(fs::read_to_string(output.join("generation.txt"))?, "1");
         // Withdrawal creates a new generation with no stale app pages or SPKs.
         for dir in ["apps", "images", "packages"] {
             fs::remove_dir_all(source.join(dir))?;
             fs::create_dir(source.join(dir))?;
         }
         fs::write(source.join("apps/index.json"), r#"{"apps":[]}"#)?;
-        publish(&source, &output)?;
+        publish_generation(&source, &output, 3)?;
+        assert_eq!(fs::read_to_string(output.join("generation.txt"))?, "3");
         assert!(!output.join("app").exists());
         assert!(!output.join("genre").exists());
         assert!(!output.join("packages/pkg-etherpad-0001").exists());
