@@ -387,7 +387,7 @@ test('Public Page is hidden when only experimental releases remain', async ({ pa
 });
 
 test('submission notification recipient defaults to unset and is approver-only', async ({ page, request }) => {
-  await page.goto('/admin/');
+  await page.goto('/admin/notifications');
   const settings = page.getByRole('region', { name: 'Submission notifications' });
   await expect(settings).toBeVisible();
   await expect(page.getByLabel('Notification email')).toHaveValue('');
@@ -451,7 +451,7 @@ test('listing changelogs show the selected build and expand without crowding rev
 });
 
 test('approvers manage signing rules and reviewers cannot change them', async ({ page, request }) => {
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   await expect(page.locator('#signing-keys')).toBeVisible();
   const initial = await (await request.get('/admin/admin')).json();
   expect(initial.signingKeys.rules.length).toBeGreaterThan(0);
@@ -473,7 +473,7 @@ test('approvers manage signing rules and reviewers cannot change them', async ({
   await expect(page.locator('#signing-key-dialog')).toBeHidden();
   const row = page.locator('#signing-key-rows tr').filter({ has: page.getByText(original, { exact: true }) });
   await expect(row).toContainText('Retained');
-  await expect(row.getByRole('link', { name: 'Rust test app', exact: true })).toHaveAttribute('href', new RegExp(`/${original}/$`));
+  await expect(row.getByRole('button', { name: 'Rust test app', exact: true })).toBeVisible();
   await row.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Edit Replacement', exact: true })).toBeVisible();
   await expect(page.locator('#signing-key-original')).toHaveValue(original);
@@ -487,7 +487,8 @@ test('approvers manage signing rules and reviewers cannot change them', async ({
   await expect(page.locator('#signing-key-dialog')).toBeHidden();
   const updated = await (await request.get('/admin/admin')).json();
   expect(updated.signingKeys.rules.find(rule => rule.original === original)).toEqual({ original, replacement, allowedPackages: [] });
-  await row.getByRole('button', { name: 'History' }).click();
+  await expect(row.getByRole('cell').last().getByRole('button')).toHaveText(['Edit']);
+  await row.getByRole('button', { name: 'Rust test app', exact: true }).click();
   await expect(page.locator('#audit-details')).toBeVisible();
   await expect(page.locator('#audit-details-json')).toContainText('signingKeyRuleChanged');
   await page.goto('/reviewer/');
@@ -497,7 +498,7 @@ test('approvers manage signing rules and reviewers cannot change them', async ({
 
 test('signing rule errors keep the draft and are not masked by refresh failures', async ({ page }) => {
   await page.clock.install();
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   await expect(page.locator('#signing-keys')).toBeVisible();
   await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
   await page.locator('#signing-key-original').fill('0'.repeat(52));
@@ -515,7 +516,7 @@ test('signing rule errors keep the draft and are not masked by refresh failures'
 
 test('replacement modal cancels without saving and new forms discard previous drafts', async ({ page, request }) => {
   await page.clock.install();
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   await expect(page.locator('#signing-keys')).toBeVisible();
   const before = (await (await request.get('/admin/admin')).json()).signingKeys;
   const rule = before.rules.find(rule => rule.allowedPackages?.length);
@@ -547,7 +548,7 @@ test('replacement modal cancels without saving and new forms discard previous dr
 });
 
 test('replacement modal prevents duplicate saves and dismissal during revalidation', async ({ page }) => {
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
   await page.locator('#signing-key-original').fill('0'.repeat(52));
   let finish;
@@ -572,7 +573,7 @@ test('replacement modal prevents duplicate saves and dismissal during revalidati
 });
 
 test('new replacements cannot overwrite an existing revocation', async ({ page, request }) => {
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   const before = (await (await request.get('/admin/admin')).json()).signingKeys;
   const rule = before.rules.find(rule => rule.allowedPackages?.length);
   await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
@@ -585,7 +586,7 @@ test('new replacements cannot overwrite an existing revocation', async ({ page, 
 });
 
 test('a committed rule can be retried immediately after a failed save response', async ({ page, request }) => {
-  await page.goto('/admin/');
+  await page.goto('/admin/replacements');
   await expect(page.locator('#signing-keys')).toBeVisible();
   const before = (await (await request.get('/admin/admin')).json()).signingKeys;
   const attempts = [];
@@ -614,4 +615,44 @@ test('a committed rule can be retried immediately after a failed save response',
     { mode: 'edit', revision: before.revision + 1 },
   ]);
   expect((await (await request.get('/admin/admin')).json()).signingKeys.revision).toBe(before.revision + 1);
+});
+
+test('header tabs route independently and preserve navigation on reload', async ({ page, request }) => {
+  await page.goto('/admin/');
+  const tabs = page.getByRole('navigation', { name: 'Administration' });
+  const apps = tabs.locator('[data-tab="apps"]');
+  await expect(apps).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#pending-count')).toHaveText('1');
+  await expect(page.locator('#notifications')).toBeHidden();
+  await expect(page.locator('#signing-keys')).toBeHidden();
+  await tabs.getByRole('link', { name: 'Notifications', exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/notifications$/);
+  await expect(page.locator('#notifications')).toBeVisible();
+  await expect(page.locator('#catalog-view')).toBeHidden();
+  await expect(apps).not.toHaveAttribute('aria-current', 'page');
+  await page.reload();
+  await expect(tabs.getByRole('link', { name: 'Notifications', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.locator('#notifications')).toBeVisible();
+  await tabs.getByRole('link', { name: 'Key replacements', exact: true }).click();
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  await expect(page.locator('#notifications')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('#notifications')).toBeVisible();
+  await apps.click();
+  await expect(page).toHaveURL(/\/admin\/apps\/$/);
+  await page.reload();
+  await expect(page.locator('#queue table')).toBeVisible();
+  const { app } = (await queue(request))[0];
+  await page.goto(`/admin/${app.appId}/`);
+  await expect(apps).toHaveAttribute('aria-current', 'page');
+  await expect(tabs.getByRole('link', { name: 'Public site' })).toHaveAttribute('href', 'http://127.0.0.1:9940/public/');
+  for (const route of ['notifications', 'replacements']) {
+    await page.goto(`/reviewer/${route}`);
+    await expect(page.locator('#access-note')).toBeVisible();
+    await expect(tabs.locator(`[data-tab="${route}"]`)).toBeHidden();
+    await expect(page.locator('#notifications')).toBeHidden();
+    await expect(page.locator('#signing-keys')).toBeHidden();
+  }
 });

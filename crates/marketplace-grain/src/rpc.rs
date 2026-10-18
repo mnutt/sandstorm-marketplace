@@ -106,7 +106,8 @@ impl web::Server for Session {
                 let path = params.get()?.get_path()?.to_str()?;
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
-                    path if crate::ids::parse_app_id(path.strip_suffix('/').unwrap_or(path)).is_ok() => {
+                    path if matches!(path.strip_suffix('/').unwrap_or(path), "apps" | "notifications" | "replacements")
+                        || crate::ids::parse_app_id(path.strip_suffix('/').unwrap_or(path)).is_ok() => {
                         let html = include_str!("review.html");
                         let html = if path.ends_with('/') {
                             html.replacen("<base href=\"./\">", "<base href=\"../\">", 1)

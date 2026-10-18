@@ -134,6 +134,7 @@ if (typeof document !== "undefined") {
   const appBase = new URL(".", document.currentScript.src);
   document.querySelector("base").href = appBase.href;
   const currentPath = () => `/${location.pathname.slice(appBase.pathname.length)}`;
+  const currentTab = () => /^(notifications|replacements)\/?$/.exec(currentPath().slice(1))?.[1] || "apps";
   const currentAppId = () => appIdFromPath(currentPath());
   function syncSandstormPath() {
     if (window.parent !== window) {
@@ -762,8 +763,21 @@ if (typeof document !== "undefined") {
     );
     const groups = publishedApps(items);
     const showingApp = !!currentAppId();
-    $("catalog-heading").hidden = showingApp;
-    $("catalog-view").hidden = showingApp;
+    const tab = currentTab();
+    const pending = pendingSubmissions(items);
+    const pendingApps = new Set(pending.map(item => item.app.appId)).size;
+    $("pending-count").textContent = pendingApps;
+    $("pending-count").hidden = pendingApps === 0;
+    $("pending-count").setAttribute("aria-label", `${pendingApps} apps awaiting review`);
+    document.querySelectorAll("[data-tab]").forEach(link => {
+      link.hidden = link.dataset.tab !== "apps" && !canApprove;
+      if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+    $("notifications").hidden = tab !== "notifications" || !canApprove;
+    $("signing-keys").hidden = tab !== "replacements" || !canApprove;
+    $("catalog-heading").hidden = showingApp || tab !== "apps";
+    $("catalog-view").hidden = showingApp || tab !== "apps";
     $("app-detail").hidden = !showingApp;
     if (showingApp) {
       renderApp(groups);
@@ -776,7 +790,6 @@ if (typeof document !== "undefined") {
       return;
     }
     $("app-detail").replaceChildren();
-    const pending = pendingSubmissions(items);
     const query = $("search").value;
     const rows = groups.filter((versions) =>
       versions.some((item) => matches(item, query)),
@@ -802,8 +815,6 @@ if (typeof document !== "undefined") {
       canApprove = snapshot.canApprove;
       serverBusy = snapshot.busy;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
-      $("notifications").hidden = !canApprove;
-      $("signing-keys").hidden = !canApprove;
       if (canApprove && snapshot.signingKeys) {
         signingKeys = snapshot.signingKeys;
         renderSigningKeys();
@@ -902,7 +913,7 @@ if (typeof document !== "undefined") {
     auditView = null;
     render();
     syncSandstormPath();
-    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : "#catalog-heading h1");
+    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : currentTab() === "notifications" ? "#notifications-heading" : currentTab() === "replacements" ? "#signing-keys-heading" : "#catalog-heading h1");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
@@ -935,18 +946,20 @@ if (typeof document !== "undefined") {
       }
       const app = apps.get(appId);
       const name = element("td");
-      name.append(app ? appLink(app) : element("span",
-        bundledSigningKeyNames[appId] || bundledSigningKeyNames[rule.original] || "Name unavailable"));
       const row = element("tr");
       row.append(name, element("td", rule.original), element("td", rule.replacement || "None"),
         element("td", rule.allowedPackages === null ? "Retained" : `${rule.allowedPackages.length} allowed`));
       const actions = element("td");
-      actions.append(writeButton("Edit", () => openSigningKey(rule)), button("History", () => runAction(async () => {
+      const historyButton = button(app?.app.name || bundledSigningKeyNames[appId] ||
+        bundledSigningKeyNames[rule.original] || "Name unavailable", () => runAction(async () => {
         const history = await json(`audit/${appId}`);
         $("audit-details-title").textContent = "App history — latest 50 events";
         $("audit-details-json").textContent = JSON.stringify(history.events.map(auditEventForDisplay), null, 2);
         $("audit-details").showModal();
-      })));
+      }));
+      historyButton.className = "app-history-link";
+      name.append(historyButton);
+      actions.append(writeButton("Edit", () => openSigningKey(rule)));
       row.append(actions);
       return row;
     }));

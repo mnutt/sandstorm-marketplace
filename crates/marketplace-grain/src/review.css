@@ -6,10 +6,13 @@ h2 { font-size: 1.5rem; font-weight: 300; color: var(--accent); }
 h3 { font-size: 1.125rem; font-weight: 600; }
 strong, summary { font-weight: 600; }
 .catalog-title { margin-bottom: 1.75rem; }
-.masthead { gap: 1.25rem; }
-.admin-label { border-left: 1px solid #a170af; padding-left: 1.25rem; color: #ead9f0; font-weight: 300; }
-#public-url { margin-left: auto; color: white; font-size: .875rem; text-decoration: none; }
-#public-url:hover { text-decoration: underline; }
+.masthead { gap: 1.25rem; flex-wrap: wrap; padding-bottom: 0; }
+.masthead > .site-title { margin-bottom: .65rem; }
+.admin-tabs { display: flex; flex-wrap: wrap; align-self: stretch; align-items: flex-end; gap: .25rem; margin-left: auto; }
+.admin-tabs a { display: inline-flex; align-items: center; gap: .4rem; padding: .5rem 1rem; background: #d1cbd7; color: var(--ink); text-decoration: none; }
+.admin-tabs a:hover { background: #ddd7e3; }
+.admin-tabs a[aria-current="page"] { background: var(--background); }
+.pending-count { display: inline-flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; padding: 0 .3rem; border-radius: 50%; background: var(--accent); color: white; font-size: .8rem; }
 .muted, small, .meta { color: var(--muted); }
 .meta { font-size: .875rem; overflow-wrap: anywhere; }
 button, input, select, textarea { font: inherit; }
@@ -81,8 +84,10 @@ dialog .actions { justify-content: flex-end; }
 @media (max-width: 600px) {
   main { padding: 1.5rem 1rem 3rem; }
   .masthead { gap: .75rem; }
-  .admin-label { font-size: .875rem; border: 0; padding: 0; }
-  #public-url { margin-left: 0; }
+  .site-title { flex-shrink: 1; white-space: normal; }
+  .site-title img { flex-shrink: 0; }
+  .admin-tabs { width: 100%; justify-content: flex-end; }
+  .admin-tabs a { padding: .4rem .75rem; font-size: .875rem; }
   input[type=search] { width: 100%; }
   th, td, .history-row > td { padding: .75rem; }
   .actions button { flex-grow: 1; }
@@ -138,3 +143,6 @@ dialog .actions { justify-content: flex-end; }
   .app-info .app-icon { width: 64px; height: 64px; }
   .release-heading .actions { flex-basis: 100%; }
 }
+
+#signing-keys .app-history-link { padding: 0; border: 0; background: none; color: var(--accent); text-align: left; white-space: normal; text-decoration: underline; text-underline-offset: .15em; font-size: 1.125rem; }
+#signing-keys .app-history-link:hover { color: #5d246b; }
