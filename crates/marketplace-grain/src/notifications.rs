@@ -215,14 +215,14 @@ async fn deliver(
     }
     Ok(())
 }
-struct CancelMail(Option<tokio::sync::oneshot::Sender<()>>);
+struct CancelMail(std::cell::RefCell<Option<tokio::sync::oneshot::Sender<()>>>);
 impl crate::activity_capnp::ongoing_notification::Server for CancelMail {
     fn cancel(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: crate::activity_capnp::ongoing_notification::CancelParams,
         _: crate::activity_capnp::ongoing_notification::CancelResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        if let Some(sender) = self.0.take() {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        if let Some(sender) = self.0.borrow_mut().take() {
             let _ = sender.send(());
         }
         capnp::capability::Promise::ok(())
@@ -248,7 +248,7 @@ async fn send(
         .set_default_text("Sending submission notification");
     request
         .get()
-        .set_notification(capnp_rpc::new_client(CancelMail(Some(cancel))));
+        .set_notification(capnp_rpc::new_client(CancelMail(Some(cancel).into())));
     let response = request.send().promise.await?;
     let _wake = response.get()?.get_handle()?;
     tokio::select! {

@@ -229,7 +229,7 @@ fn verify_pgp(app_id: &str, signature: &[u8], keyring: &[u8]) -> Result<String> 
         .0
     {
         let key = key?;
-        key.verify()?;
+        key.verify_bindings()?;
         if message.verify(&key).is_ok()
             || key
                 .public_subkeys

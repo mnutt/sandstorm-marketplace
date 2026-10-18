@@ -12,27 +12,27 @@ serde.workspace = true
 serde_json.workspace = true
 marketplace-web = { path = "../marketplace-web" }
 marketplace-model = { path = "../marketplace-model" }
-capnp = "0.21"
-capnp-rpc = "0.21"
+capnp = "0.27"
+capnp-rpc = "0.27"
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
-ed25519-dalek = "2"
-sha2 = "0.10"
-blake2 = "0.10"
+ed25519-dalek = "3"
+sha2 = "0.11"
+blake2 = "0.11"
 hex = "0.4"
-base64 = "0.22"
-lzma-rust2 = "0.13"
+base64 = "0.23"
+lzma-rust2 = "0.23"
 # Legacy Keybase proofs use short initial partial-body chunks accepted by GnuPG.
 # This enables parsing compatibility; cryptographic signature checks still apply.
-pgp = { version = "0.17", default-features = false, features = ["malformed-artifact-compat"] }
+pgp = { version = "0.21", default-features = false, features = ["malformed-artifact-compat"] }
 tempfile = "3"
 tar = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 
 [build-dependencies]
-capnpc = "0.21"
+capnpc = "0.27"
 
 [dev-dependencies]
 libc = "0.2"

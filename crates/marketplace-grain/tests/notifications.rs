@@ -35,14 +35,14 @@ impl Drop for Wake {
 }
 impl marketplace_grain::grain_capnp::sandstorm_api::Server<capnp::any_pointer::Owned> for Platform {
     fn stay_awake(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeParams<
             capnp::any_pointer::Owned,
         >,
         mut results: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeResults<
             capnp::any_pointer::Owned,
         >,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         self.0.awake.set(self.0.awake.get() + 1);
         results.get().set_handle(capnp_rpc::new_client(Wake {
             mailbox: self.0.clone(),
@@ -58,10 +58,10 @@ struct Context(Rc<Mailbox>);
 impl session_context::Server for Context {}
 impl hack_session_context::Server for Context {
     fn get_public_id(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: hack_session_context::GetPublicIdParams,
         mut results: hack_session_context::GetPublicIdResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         results.get().set_public_id("test-grain");
         results.get().set_hostname("example.invalid");
         Promise::ok(())
@@ -69,10 +69,10 @@ impl hack_session_context::Server for Context {
 }
 impl email_send_port::Server for Context {
     fn send(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: email_send_port::SendParams,
         _: email_send_port::SendResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         let result = (|| {
             assert_eq!(self.0.awake.get(), 1, "delivery must keep the grain awake");
             let email = params.get()?.get_email()?;

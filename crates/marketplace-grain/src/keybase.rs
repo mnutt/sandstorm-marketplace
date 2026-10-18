@@ -92,7 +92,7 @@ pub async fn lookup(
     let (sender, receiver) = futures::channel::oneshot::channel();
     let stream: byte_stream::Client = capnp_rpc::new_client(Collector {
         bytes: bytes.clone(),
-        sender: Some(sender),
+        sender: RefCell::new(Some(sender)),
     });
     let mut request = endpoint.get_request();
     request.get().set_path(
@@ -185,10 +185,13 @@ pub async fn lookup(
 }
 struct Collector {
     bytes: Rc<RefCell<Vec<u8>>>,
-    sender: Option<futures::channel::oneshot::Sender<()>>,
+    sender: RefCell<Option<futures::channel::oneshot::Sender<()>>>,
 }
 impl byte_stream::Server for Collector {
-    fn write(&mut self, params: byte_stream::WriteParams) -> Promise<(), capnp::Error> {
+    fn write(
+        self: std::rc::Rc<Self>,
+        params: byte_stream::WriteParams,
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         let result: Result<()> = (|| {
             let params = params.get()?;
             let data = params.get_data()?;
@@ -203,11 +206,11 @@ impl byte_stream::Server for Collector {
         Promise::from_future(async { result.map_err(error) })
     }
     fn done(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: byte_stream::DoneParams,
         _: byte_stream::DoneResults,
-    ) -> Promise<(), capnp::Error> {
-        if let Some(sender) = self.sender.take() {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        if let Some(sender) = self.sender.borrow_mut().take() {
             let _ = sender.send(());
         }
         Promise::ok(())

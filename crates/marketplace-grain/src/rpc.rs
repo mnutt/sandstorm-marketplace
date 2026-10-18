@@ -31,20 +31,20 @@ pub struct View {
 }
 impl ui_view::Server for View {
     fn get_view_info(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: ui_view::GetViewInfoParams,
         mut results: ui_view::GetViewInfoResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         promise((|| {
             results.set(crate::app_index_capnp::APP_INDEX_VIEW_INFO.get()?)?;
             Ok(())
         })())
     }
     fn new_session(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: ui_view::NewSessionParams,
         mut results: ui_view::NewSessionResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         promise((|| {
             let params = params.get()?;
             let permissions = params.get_user_info()?.get_permissions()?;
@@ -84,10 +84,10 @@ impl ui_session::Server for Session {}
 impl api_session::Server for Session {}
 impl web::Server for Session {
     fn get(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: web::GetParams,
         mut results: web::GetResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         let registry = self.registry.clone();
         let context = self.context.clone();
         let api = self.api;
@@ -184,10 +184,10 @@ impl web::Server for Session {
         })
     }
     fn post(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: web::PostParams,
         mut results: web::PostResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         let registry = self.registry.clone();
         let api = self.api;
         let can_approve = self.can_approve;
@@ -314,10 +314,10 @@ impl web::Server for Session {
         })
     }
     fn post_streaming(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: web::PostStreamingParams,
         mut results: web::PostStreamingResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         let result: Result<()> = (|| {
             let params = params.get()?;
             let path = params.get_path()?.to_str()?;
@@ -344,7 +344,7 @@ impl web::Server for Session {
             ensure!(size <= limit, "upload too large");
             tracing::info!(import, expected_bytes = size, "Upload stream opened");
             let (sender, receiver) = futures::channel::oneshot::channel();
-            let stream: web::request_stream::Client = capnp_rpc::new_client(Upload {
+            let stream: web::request_stream::Client = capnp_rpc::new_client(RefCell::new(Upload {
                 registry: self.registry.clone(),
                 platform: self.platform.clone(),
                 file: Some(self.registry.temporary()?),
@@ -356,7 +356,7 @@ impl web::Server for Session {
                 expected: (size != 0).then_some(size),
                 sender: Some(sender),
                 receiver: Some(receiver),
-            });
+            }));
             results.get().set_stream(stream);
             Ok(())
         })();
@@ -380,62 +380,69 @@ struct Upload {
     sender: Option<futures::channel::oneshot::Sender<std::result::Result<(), String>>>,
     receiver: Option<futures::channel::oneshot::Receiver<std::result::Result<(), String>>>,
 }
-impl byte_stream::Server for Upload {
-    fn write(&mut self, params: byte_stream::WriteParams) -> Promise<(), capnp::Error> {
+impl byte_stream::Server for RefCell<Upload> {
+    fn write(
+        self: std::rc::Rc<Self>,
+        params: byte_stream::WriteParams,
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        let mut upload = self.borrow_mut();
         promise((|| {
             let params = params.get()?;
             let data = params.get_data()?;
-            let count = self
+            let count = upload
                 .count
                 .checked_add(data.len() as u64)
                 .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
             ensure!(
-                count <= self.expected.unwrap_or(self.limit),
+                count <= upload.expected.unwrap_or(upload.limit),
                 "upload exceeds expected size"
             );
-            self.file
+            upload
+                .file
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("upload already finished"))?
                 .write_all(data)?;
-            self.count = count;
-            if self.last_progress.elapsed() >= std::time::Duration::from_secs(5) {
-                tracing::info!(import = self.import, bytes = count, expected_bytes = ?self.expected, elapsed_secs = self.started.elapsed().as_secs(), "Upload progress");
-                self.last_progress = std::time::Instant::now();
+            upload.count = count;
+            if upload.last_progress.elapsed() >= std::time::Duration::from_secs(5) {
+                tracing::info!(import = upload.import, bytes = count, expected_bytes = ?upload.expected, elapsed_secs = upload.started.elapsed().as_secs(), "Upload progress");
+                upload.last_progress = std::time::Instant::now();
             }
             Ok(())
         })())
     }
     fn expect_size(
-        &mut self,
+        self: std::rc::Rc<Self>,
         params: byte_stream::ExpectSizeParams,
         _: byte_stream::ExpectSizeResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        let mut upload = self.borrow_mut();
         promise((|| {
-            let total = self
+            let total = upload
                 .count
                 .checked_add(params.get()?.get_size())
                 .ok_or_else(|| anyhow::anyhow!("upload too large"))?;
             ensure!(
-                total <= self.limit && self.expected.is_none_or(|v| v == total),
+                total <= upload.limit && upload.expected.is_none_or(|v| v == total),
                 "invalid expected size"
             );
-            self.expected = Some(total);
+            upload.expected = Some(total);
             Ok(())
         })())
     }
     fn done(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: byte_stream::DoneParams,
         _: byte_stream::DoneResults,
-    ) -> Promise<(), capnp::Error> {
-        let file = self.file.take();
-        let registry = self.registry.clone();
-        let platform = self.platform.clone();
-        let import = self.import;
-        let expected = self.expected;
-        let count = self.count;
-        let started = self.started;
-        let sender = self.sender.take();
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        let mut upload = self.borrow_mut();
+        let file = upload.file.take();
+        let registry = upload.registry.clone();
+        let platform = upload.platform.clone();
+        let import = upload.import;
+        let expected = upload.expected;
+        let count = upload.count;
+        let started = upload.started;
+        let sender = upload.sender.take();
         Promise::from_future(async move {
             let result: Result<()> = async {
                 let file = file.ok_or_else(|| anyhow::anyhow!("upload already finished"))?;
@@ -467,13 +474,14 @@ impl byte_stream::Server for Upload {
         })
     }
 }
-impl web::request_stream::Server for Upload {
+impl web::request_stream::Server for RefCell<Upload> {
     fn get_response(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: web::request_stream::GetResponseParams,
         mut results: web::request_stream::GetResponseResults,
-    ) -> Promise<(), capnp::Error> {
-        let receiver = self.receiver.take();
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
+        let mut upload = self.borrow_mut();
+        let receiver = upload.receiver.take();
         Promise::from_future(async move {
             let result = receiver
                 .ok_or_else(|| error("getResponse already called"))?

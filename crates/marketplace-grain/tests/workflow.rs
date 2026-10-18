@@ -268,14 +268,14 @@ async fn process_entry_point(recovery: bool) -> anyhow::Result<()> {
     struct Platform;
     impl marketplace_grain::grain_capnp::sandstorm_api::Server<capnp::any_pointer::Owned> for Platform {
         fn stay_awake(
-            &mut self,
+            self: std::rc::Rc<Self>,
             _: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeParams<
                 capnp::any_pointer::Owned,
             >,
             mut results: marketplace_grain::grain_capnp::sandstorm_api::StayAwakeResults<
                 capnp::any_pointer::Owned,
             >,
-        ) -> capnp::capability::Promise<(), capnp::Error> {
+        ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
             results.get().set_handle(capnp_rpc::new_client(Wake));
             capnp::capability::Promise::ok(())
         }
@@ -596,27 +596,27 @@ async fn reviewers_can_stream_private_packages_but_submitters_cannot() -> anyhow
     }
     impl byte_stream::Server for Sink {
         fn expect_size(
-            &mut self,
+            self: std::rc::Rc<Self>,
             params: byte_stream::ExpectSizeParams,
             _: byte_stream::ExpectSizeResults,
-        ) -> capnp::capability::Promise<(), capnp::Error> {
+        ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
             self.expected.set(params.get().unwrap().get_size());
             capnp::capability::Promise::ok(())
         }
         fn write(
-            &mut self,
+            self: std::rc::Rc<Self>,
             params: byte_stream::WriteParams,
-        ) -> capnp::capability::Promise<(), capnp::Error> {
+        ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
             self.bytes
                 .borrow_mut()
                 .extend_from_slice(params.get().unwrap().get_data().unwrap());
             capnp::capability::Promise::ok(())
         }
         fn done(
-            &mut self,
+            self: std::rc::Rc<Self>,
             _: byte_stream::DoneParams,
             _: byte_stream::DoneResults,
-        ) -> capnp::capability::Promise<(), capnp::Error> {
+        ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
             self.done.set(true);
             capnp::capability::Promise::ok(())
         }

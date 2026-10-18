@@ -74,23 +74,26 @@ struct Collector {
 }
 impl byte_stream::Server for Collector {
     fn expect_size(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: byte_stream::ExpectSizeParams,
         _: byte_stream::ExpectSizeResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         Promise::ok(())
     }
-    fn write(&mut self, params: byte_stream::WriteParams) -> Promise<(), capnp::Error> {
+    fn write(
+        self: std::rc::Rc<Self>,
+        params: byte_stream::WriteParams,
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         self.bytes
             .borrow_mut()
             .extend_from_slice(params.get().unwrap().get_data().unwrap());
         Promise::ok(())
     }
     fn done(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: byte_stream::DoneParams,
         _: byte_stream::DoneResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         self.done.set(true);
         Promise::ok(())
     }

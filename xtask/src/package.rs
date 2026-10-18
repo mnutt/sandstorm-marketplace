@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use capnp::{message::Builder, serialize};
 use ed25519_dalek::{Signer, SigningKey};
 use marketplace_grain::{ids, package_capnp as p, spk};
-use rand::RngCore;
+use rand::TryRng;
 use sha2::{Digest, Sha512};
 use std::{
     fs::{self, File, OpenOptions},
@@ -68,7 +68,9 @@ fn identity(root: &Path) -> Result<SigningKey> {
         Ok(signing)
     } else {
         let mut seed = [0; 32];
-        rand::rngs::OsRng.fill_bytes(&mut seed);
+        rand::rngs::SysRng
+            .try_fill_bytes(&mut seed)
+            .context("generating signing key entropy")?;
         let key = SigningKey::from_bytes(&seed);
         let mut private = seed.to_vec();
         private.extend_from_slice(key.verifying_key().as_bytes());

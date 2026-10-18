@@ -41,13 +41,13 @@ fn main() {
     command
         .run()
         .expect("compile Sandstorm schemas (install the capnp compiler or set CAPNP)");
-    // capnpc 0.21 emits an unbound generic for an enum nested in a generic
+    // capnpc emits an unbound generic for an enum nested in a generic
     // supervisor struct. The enum has no generic fields; instantiate its
     // annotation accessor with AnyPointer without changing the wire schema.
     let supervisor = Path::new(&env::var("OUT_DIR").unwrap()).join("sandstorm/supervisor_capnp.rs");
     let generated = fs::read_to_string(&supervisor).unwrap().replace(
-        "annotation_types: type_::get_annotation_types }",
-        "annotation_types: type_::get_annotation_types::<::capnp::any_pointer::Owned> }",
+        "type_::get_annotation_types)",
+        "type_::get_annotation_types::<::capnp::any_pointer::Owned>)",
     );
     fs::write(supervisor, generated).unwrap();
     fs::write(

@@ -18,10 +18,10 @@ pub(crate) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
 struct Notification(Arc<AtomicBool>);
 impl ongoing_notification::Server for Notification {
     fn cancel(
-        &mut self,
+        self: std::rc::Rc<Self>,
         _: ongoing_notification::CancelParams,
         _: ongoing_notification::CancelResults,
-    ) -> Promise<(), capnp::Error> {
+    ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
         tracing::info!("Sandstorm requested cancellation of package processing");
         self.0.store(true, Ordering::Release);
         Promise::ok(())
@@ -192,10 +192,10 @@ mod tests {
     }
     impl sandstorm_api::Server<capnp::any_pointer::Owned> for Platform {
         fn stay_awake(
-            &mut self,
+            self: std::rc::Rc<Self>,
             params: sandstorm_api::StayAwakeParams<capnp::any_pointer::Owned>,
             mut results: sandstorm_api::StayAwakeResults<capnp::any_pointer::Owned>,
-        ) -> Promise<(), capnp::Error> {
+        ) -> impl std::future::Future<Output = capnp::Result<()>> + 'static {
             *self.notification.borrow_mut() =
                 Some(params.get().unwrap().get_notification().unwrap());
             self.handles.fetch_add(1, Ordering::SeqCst);
