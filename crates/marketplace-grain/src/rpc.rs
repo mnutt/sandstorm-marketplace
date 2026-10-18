@@ -118,6 +118,7 @@ impl web::Server for Session {
                             releases: registry.queue()?,
                             can_approve,
                             busy: registry.is_busy(),
+                            signing_keys: if can_approve { Some(registry.signing_key_rules()?) } else { None },
                             notifications: if can_approve { Some(crate::notifications::settings(&registry)?) } else { None },
                         };
                         content(results.get(), "application/json", &serde_json::to_vec(&snapshot)?);
@@ -211,7 +212,9 @@ impl web::Server for Session {
                 let body = data.get_content()?;
                 ensure!(api || can_approve, "approval permission denied");
                 // Upload/import preparation does not touch live registry state.
-                let _operation = if (api && path == "upload") || (!api && path == "import") {
+                let _operation = if (api && path == "upload")
+                    || (!api && matches!(path, "import" | "signing-keys"))
+                {
                     None
                 } else {
                     Some(registry.begin_operation().await)
@@ -237,7 +240,13 @@ impl web::Server for Session {
                         _ => not_found(results.get()),
                     }
                 } else {
-                    if path == "import" {
+                    if path == "signing-keys" {
+                        ensure!(body.len() <= 32 * 1024, "signing-key rule is too large");
+                        let update = serde_json::from_slice(body)?;
+                        crate::work::update_signing_key(registry.clone(), platform.clone(), update)
+                            .await?;
+                        results.get().init_no_content();
+                    } else if path == "import" {
                         ensure!(
                             registry.package_ids()?.is_empty(),
                             "import is only available in an empty grain"

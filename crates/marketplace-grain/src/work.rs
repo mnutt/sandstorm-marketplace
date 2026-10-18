@@ -60,7 +60,7 @@ where
             .set_default_text(if import {
                 "Importing marketplace packages"
             } else {
-                "Verifying an uploaded app package"
+                "Verifying marketplace packages"
             });
         request
             .get()
@@ -153,6 +153,21 @@ pub(crate) async fn upload(
         )
         .await
     }
+}
+
+pub(crate) async fn update_signing_key(
+    registry: Registry,
+    platform: PlatformSlot,
+    update: crate::replacements::Update,
+) -> Result<()> {
+    run(
+        registry,
+        platform,
+        false,
+        move |registry, cancelled| registry.prepare_key_rule(update, cancelled),
+        |registry, prepared, cancelled| registry.commit_key_rule(prepared, cancelled),
+    )
+    .await
 }
 
 #[cfg(test)]

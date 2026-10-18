@@ -35,26 +35,28 @@ impl Database {
         )?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            matches!(version, 0..=2),
+            matches!(version, 0..=3),
             "marketplace database is newer than this program"
         );
-        if version < 2 {
+        if version < 3 {
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // Recheck after acquiring the writer lock in case another opener initialized it.
             let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            match version {
-                0 => {
-                    tx.execute_batch(include_str!("schema.sql"))?;
-                    tx.execute_batch(include_str!("notifications.sql"))?;
-                    tx.execute_batch("PRAGMA user_version=2;")?;
-                }
-                1 => {
-                    tx.execute_batch(include_str!("notifications.sql"))?;
-                    tx.execute_batch("PRAGMA user_version=2;")?;
-                }
-                2 => {}
-                _ => anyhow::bail!("unsupported marketplace database version"),
+            ensure!(
+                matches!(version, 0..=3),
+                "unsupported marketplace database version"
+            );
+            if version == 0 {
+                tx.execute_batch(include_str!("schema.sql"))?;
+            }
+            if version < 2 {
+                tx.execute_batch(include_str!("notifications.sql"))?;
+            }
+            if version < 3 {
+                tx.execute_batch(include_str!("replacements.sql"))?;
+                crate::replacements::write_rules(&tx, &crate::replacements::bundled()?)?;
+                tx.execute_batch("PRAGMA user_version=3;")?;
             }
             tx.commit()?;
             std::fs::File::open(root)?.sync_all()?;

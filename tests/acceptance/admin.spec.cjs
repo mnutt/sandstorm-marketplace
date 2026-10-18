@@ -19,7 +19,7 @@ test.beforeEach(async ({ request }) => {
 });
 test('review, publish, history, rollback, rejection, and restoring latest', async ({ page, request }) => {
   await page.goto('/admin/');
-  await expect(page.getByRole('table')).toBeVisible();
+  await expect(page.locator('#queue').getByRole('table')).toBeVisible();
   await expect(page.locator('#review-queue .card')).toHaveCount(2);
   await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();
   await expect(page.locator('#app-detail .release')).toHaveCount(4);
@@ -37,7 +37,7 @@ test('review, publish, history, rollback, rejection, and restoring latest', asyn
   expect(await publicVersion(request)).toBe(2);
   expect((await queue(request)).find(row => row.app.versionNumber === 3).reason).toBe('Please fix the broken import.');
   await page.getByRole('link', { name: 'Sandstorm App Market' }).click();
-  await expect(page.getByRole('table')).toBeVisible();
+  await expect(page.locator('#queue').getByRole('table')).toBeVisible();
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Version history' })).toBeVisible();
 });
@@ -167,7 +167,7 @@ test('malformed stored metadata can be rejected through the admin UI', async ({ 
 test('mobile layout preserves table and review navigation', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/admin/');
-  await expect(page.getByRole('table')).toBeVisible();
+  await expect(page.locator('#queue').getByRole('table')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
   await page.locator('#review-queue h3').getByRole('link').first().click();
   await expect(page.getByRole('heading', { name: 'Version history' })).toBeVisible();
@@ -182,7 +182,7 @@ test('malformed signed submissions are rejected before affecting the catalog', a
   expect(await queue(request)).toHaveLength(4);
   expect(await publicVersion(request)).toBe(2);
   await page.goto('/admin/');
-  await expect(page.getByRole('table')).toBeVisible();
+  await expect(page.locator('#queue').getByRole('table')).toBeVisible();
 });
 
 
@@ -448,4 +448,170 @@ test('listing changelogs show the selected build and expand without crowding rev
   }
   await page.goto(preview(1));
   await expect(page.locator('.changelog')).toHaveCount(0);
+});
+
+test('approvers manage signing rules and reviewers cannot change them', async ({ page, request }) => {
+  await page.goto('/admin/');
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  const initial = await (await request.get('/admin/admin')).json();
+  expect(initial.signingKeys.rules.length).toBeGreaterThan(0);
+  await expect(page.locator('#signing-key-rows tr')).toHaveCount(initial.signingKeys.rules.length);
+  for (const name of ['Paperwork', 'draw.io', 'Wekan', 'WordPress', 'MediaWiki']) {
+    await expect(page.locator('#signing-key-rows').getByRole('cell', { name, exact: true })).toBeVisible();
+  }
+  await expect(page.locator('#signing-keys')).toContainText('Sandstorm servers and packaging tools');
+  const original = initial.releases[0].app.appId, replacement = '2'.repeat(51) + '0';
+  await expect(page.locator('#signing-key-form')).toBeHidden();
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'New Replacement', exact: true })).toBeVisible();
+  await expect(page.locator('#signing-key-original')).toBeEmpty();
+  await expect(page.locator('#signing-key-replacement')).toBeEmpty();
+  await page.locator('#signing-key-original').fill(original);
+  await page.locator('#signing-key-replacement').fill(replacement);
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(page.locator('#message')).toContainText('Signing-key rule saved');
+  await expect(page.locator('#signing-key-dialog')).toBeHidden();
+  const row = page.locator('#signing-key-rows tr').filter({ has: page.getByText(original, { exact: true }) });
+  await expect(row).toContainText('Retained');
+  await expect(row.getByRole('link', { name: 'Rust test app', exact: true })).toHaveAttribute('href', new RegExp(`/${original}/$`));
+  await row.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Edit Replacement', exact: true })).toBeVisible();
+  await expect(page.locator('#signing-key-original')).toHaveValue(original);
+  await expect(page.locator('#signing-key-original')).not.toBeEditable();
+  await expect(page.locator('#signing-key-replacement')).toHaveValue(replacement);
+  await expect(page.locator('#signing-key-revoke')).not.toBeChecked();
+  await page.locator('#signing-key-revoke').check();
+  await expect(page.locator('#signing-key-allowed')).toBeEnabled();
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(row).toContainText('0 allowed');
+  await expect(page.locator('#signing-key-dialog')).toBeHidden();
+  const updated = await (await request.get('/admin/admin')).json();
+  expect(updated.signingKeys.rules.find(rule => rule.original === original)).toEqual({ original, replacement, allowedPackages: [] });
+  await row.getByRole('button', { name: 'History' }).click();
+  await expect(page.locator('#audit-details')).toBeVisible();
+  await expect(page.locator('#audit-details-json')).toContainText('signingKeyRuleChanged');
+  await page.goto('/reviewer/');
+  await expect(page.locator('#signing-keys')).toBeHidden();
+  expect((await request.post('/reviewer/signing-keys', { data: { revision: 0, rule: { original, replacement, allowedPackages: null } } })).ok()).toBeFalsy();
+});
+
+test('signing rule errors keep the draft and are not masked by refresh failures', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/admin/');
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await page.locator('#signing-key-original').fill('0'.repeat(52));
+  await page.route('**/admin/signing-keys', route => route.fulfill({
+    status: 400, contentType: 'text/plain', body: 'signing-key rules changed; refresh and try again',
+  }));
+  await page.route('**/admin/admin', route => route.abort());
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(page.locator('#signing-key-error')).toHaveText('signing-key rules changed; refresh and try again');
+  await expect(page.getByRole('dialog', { name: 'New Replacement', exact: true })).toBeVisible();
+  await expect(page.locator('#signing-key-original')).toHaveValue('0'.repeat(52));
+  await expect(page.locator('#signing-key-status')).toBeEmpty();
+  await expect(page.getByRole('button', { name: 'Save signing-key rule' })).toBeEnabled();
+});
+
+test('replacement modal cancels without saving and new forms discard previous drafts', async ({ page, request }) => {
+  await page.clock.install();
+  await page.goto('/admin/');
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  const before = (await (await request.get('/admin/admin')).json()).signingKeys;
+  const rule = before.rules.find(rule => rule.allowedPackages?.length);
+  const row = page.locator('#signing-key-rows tr').filter({ has: page.getByText(rule.original, { exact: true }) });
+  await row.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('#signing-key-revoke')).toBeChecked();
+  await expect(page.locator('#signing-key-allowed')).toHaveValue(rule.allowedPackages.join('\n'));
+  await page.locator('#signing-key-allowed').fill('a'.repeat(32));
+  await page.clock.fastForward(30001);
+  await expect(page.locator('#signing-key-allowed')).toHaveValue('a'.repeat(32));
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('#signing-key-dialog')).toBeHidden();
+  await expect(row.getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await expect(page.locator('#signing-key-original')).toBeEmpty();
+  await expect(page.locator('#signing-key-original')).toBeEditable();
+  await expect(page.locator('#signing-key-replacement')).toBeEmpty();
+  await expect(page.locator('#signing-key-replacement')).toBeEditable();
+  await expect(page.locator('#signing-key-revoke')).not.toBeChecked();
+  await expect(page.locator('#signing-key-allowed')).toBeEmpty();
+  await expect(page.locator('#signing-key-allowed')).toBeDisabled();
+  await page.locator('#signing-key-original').fill('0'.repeat(52));
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#signing-key-dialog')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'New Replacement', exact: true })).toBeFocused();
+  await row.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('#signing-key-allowed')).toHaveValue(rule.allowedPackages.join('\n'));
+  expect((await (await request.get('/admin/admin')).json()).signingKeys).toEqual(before);
+});
+
+test('replacement modal prevents duplicate saves and dismissal during revalidation', async ({ page }) => {
+  await page.goto('/admin/');
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await page.locator('#signing-key-original').fill('0'.repeat(52));
+  let finish;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  await page.route('**/admin/signing-keys', async route => {
+    await waiting;
+    await route.fulfill({ status: 400, contentType: 'text/plain', body: 'Please retry verification' });
+  });
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  try {
+    await expect(page.locator('#signing-key-status')).toContainText('Revalidating');
+    await expect(page.getByRole('button', { name: 'Save signing-key rule' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+    await expect(page.locator('#signing-key-original')).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#signing-key-dialog')).toBeVisible();
+  } finally {
+    finish();
+  }
+  await expect(page.locator('#signing-key-error')).toHaveText('Please retry verification');
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled();
+});
+
+test('new replacements cannot overwrite an existing revocation', async ({ page, request }) => {
+  await page.goto('/admin/');
+  const before = (await (await request.get('/admin/admin')).json()).signingKeys;
+  const rule = before.rules.find(rule => rule.allowedPackages?.length);
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await page.locator('#signing-key-original').fill(rule.original);
+  await page.locator('#signing-key-replacement').fill(rule.replacement);
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(page.locator('#signing-key-error')).toContainText('already exists');
+  await expect(page.locator('#signing-key-dialog')).toBeVisible();
+  expect((await (await request.get('/admin/admin')).json()).signingKeys).toEqual(before);
+});
+
+test('a committed rule can be retried immediately after a failed save response', async ({ page, request }) => {
+  await page.goto('/admin/');
+  await expect(page.locator('#signing-keys')).toBeVisible();
+  const before = (await (await request.get('/admin/admin')).json()).signingKeys;
+  const attempts = [];
+  await page.route('**/admin/signing-keys', async route => {
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length === 1) {
+      // Persist the real rule, then simulate a failure after commit. Backend
+      // integration tests separately exercise an actual publication failure.
+      const response = await route.fetch();
+      expect(response.status()).toBe(204);
+      await route.fulfill({ status: 400, contentType: 'text/plain', body: 'Signing-key rule saved, but public site rebuild failed' });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.getByRole('button', { name: 'New Replacement', exact: true }).click();
+  await page.locator('#signing-key-original').fill('0'.repeat(52));
+  await page.locator('#signing-key-replacement').fill('2'.repeat(51) + '0');
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(page.locator('#signing-key-error')).toContainText('rule saved');
+  await expect(page.locator('#signing-key-original')).toHaveValue('0'.repeat(52));
+  await page.getByRole('button', { name: 'Save signing-key rule' }).click();
+  await expect(page.locator('#signing-key-dialog')).toBeHidden();
+  expect(attempts.map(({ mode, revision }) => ({ mode, revision }))).toEqual([
+    { mode: 'create', revision: before.revision },
+    { mode: 'edit', revision: before.revision + 1 },
+  ]);
+  expect((await (await request.get('/admin/admin')).json()).signingKeys.revision).toBe(before.revision + 1);
 });

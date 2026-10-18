@@ -65,6 +65,16 @@ function canRollback(item, versions) {
     item.app.versionNumber < current.app.versionNumber
   );
 }
+// Display-only names from the comments in Sandstorm's bundled replacement table.
+// Submitted metadata takes precedence; these labels never affect app identity.
+const bundledSigningKeyNames = {
+  vjvekechd398fn1t1kn1dgdnmaekqq9jkjv3zsgzymc4z913ref0: "My Cool Example App",
+  vxe8awcxvtj6yu0vgjpm1tsaeu7x8v8tfp71tyvnm6ykkephu9q0: "Paperwork",
+  nfqhx83vvzm80edpgkpax8mhqp176qj2vwg67rgq5e3kjc5r4cyh: "draw.io",
+  m86q05rdvj14yvn78ghaxynqz7u2svw6rnttptxx49g1785cdv1h: "Wekan",
+  aax9j672p6z8n7nyupzvj2nmumeqd4upa0f7mgu8gprwmy53x04h: "WordPress",
+  p04q48xd2kgkystkrda5n77kdns6u569wnactgh904tf7s3vev70: "MediaWiki",
+};
 const auditEventLabels = {
   submitted: "Package submitted", imported: "Package imported",
   resubmitted: "Resubmitted — no state change",
@@ -73,6 +83,8 @@ const auditEventLabels = {
   authorStateChanged: "Author request changed", rolledBack: "Rollback selected",
   rollbackCleared: "Rollback cleared", deprecated: "App deprecated",
   restored: "App restored", publicationChanged: "Public visibility changed",
+  signingKeyRuleChanged: "Signing-key rule changed",
+  signingKeyValidationChanged: "Signing-key validation changed",
 };
 function auditActorForDisplay(actor, action) {
   if (actor.signingKey) return { kind: "appSigningKey", signingKey: actor.signingKey };
@@ -141,6 +153,9 @@ if (typeof document !== "undefined") {
   let publicBase = null;
   let notificationSending = false;
   let notificationDirty = false;
+  let signingKeys = { revision: 0, rules: [] };
+  let signingKeyRevision = 0;
+  let signingKeyMode = "create";
 
   function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -196,6 +211,9 @@ if (typeof document !== "undefined") {
     document.querySelectorAll("[data-write]").forEach((node) => {
       node.hidden = !canApprove;
       node.disabled = working || serverBusy;
+    });
+    $("signing-key-form").querySelectorAll("input,textarea,button").forEach(node => {
+      node.disabled = working || serverBusy || (node.id === "signing-key-allowed" && !$("signing-key-revoke").checked);
     });
     $("import-submit").disabled = working || serverBusy;
     $("notifications-retry").disabled = working || serverBusy || notificationSending;
@@ -785,6 +803,11 @@ if (typeof document !== "undefined") {
       serverBusy = snapshot.busy;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
       $("notifications").hidden = !canApprove;
+      $("signing-keys").hidden = !canApprove;
+      if (canApprove && snapshot.signingKeys) {
+        signingKeys = snapshot.signingKeys;
+        renderSigningKeys();
+      }
       const notifications = snapshot.notifications;
       if (canApprove && notifications) {
         if (!notificationDirty) $("notification-recipient").value = notifications.recipient;
@@ -901,6 +924,95 @@ if (typeof document !== "undefined") {
     render();
   };
   $("notification-recipient").oninput = () => { notificationDirty = true; };
+  function renderSigningKeys() {
+    const apps = new Map(groupApps(items).map(versions => [versions[0].app.appId, versions[0]]));
+    $("signing-key-rows").replaceChildren(...signingKeys.rules.map(rule => {
+      let appId = rule.original;
+      for (let i = 0; i < signingKeys.rules.length; i++) {
+        const parent = signingKeys.rules.find(item => item.replacement === appId);
+        if (!parent) break;
+        appId = parent.original;
+      }
+      const app = apps.get(appId);
+      const name = element("td");
+      name.append(app ? appLink(app) : element("span",
+        bundledSigningKeyNames[appId] || bundledSigningKeyNames[rule.original] || "Name unavailable"));
+      const row = element("tr");
+      row.append(name, element("td", rule.original), element("td", rule.replacement || "None"),
+        element("td", rule.allowedPackages === null ? "Retained" : `${rule.allowedPackages.length} allowed`));
+      const actions = element("td");
+      actions.append(writeButton("Edit", () => openSigningKey(rule)), button("History", () => runAction(async () => {
+        const history = await json(`audit/${appId}`);
+        $("audit-details-title").textContent = "App history — latest 50 events";
+        $("audit-details-json").textContent = JSON.stringify(history.events.map(auditEventForDisplay), null, 2);
+        $("audit-details").showModal();
+      })));
+      row.append(actions);
+      return row;
+    }));
+  }
+  function openSigningKey(rule = null) {
+    $("signing-key-form").reset();
+    $("signing-key-title").textContent = rule ? "Edit Replacement" : "New Replacement";
+    $("signing-key-original").value = rule?.original || "";
+    $("signing-key-original").readOnly = !!rule;
+    $("signing-key-replacement").value = rule?.replacement || "";
+    $("signing-key-replacement").readOnly = !!rule?.replacement;
+    $("signing-key-revoke").checked = rule?.allowedPackages != null;
+    $("signing-key-allowed").value = (rule?.allowedPackages || []).join("\n");
+    signingKeyRevision = signingKeys.revision;
+    signingKeyMode = rule ? "edit" : "create";
+    notice("signing-key-error", "");
+    updateControls();
+    $("signing-key-dialog").showModal();
+  }
+  $("signing-key-new").onclick = () => openSigningKey();
+  $("signing-key-cancel").onclick = () => $("signing-key-dialog").close();
+  $("signing-key-dialog").addEventListener("cancel", event => {
+    if (working) event.preventDefault();
+  });
+  $("signing-key-revoke").onchange = updateControls;
+  $("signing-key-form").onsubmit = async event => {
+    event.preventDefault();
+    await runAction(async () => {
+      const rule = {
+        original: $("signing-key-original").value.trim(),
+        replacement: $("signing-key-replacement").value.trim() || null,
+        allowedPackages: $("signing-key-revoke").checked
+          ? $("signing-key-allowed").value.split(/\s+/).filter(Boolean) : null,
+      };
+      notice("signing-key-error", "");
+      $("signing-key-status").textContent = "Revalidating affected packages and rebuilding the public site…";
+      try {
+        await request("signing-keys", JSON.stringify({ mode: signingKeyMode, revision: signingKeyRevision, rule }));
+        $("signing-key-dialog").close();
+        notice("message", "Signing-key rule saved and public site rebuilt.");
+        await refresh();
+      } catch (err) {
+        if (!$("signing-key-dialog").open) throw err;
+        // Reload settings without replacing the draft. A failed publication may
+        // still have committed the rule; retry that exact rule as an edit.
+        try {
+          await refresh();
+          const saved = signingKeys.rules.find(item => item.original === rule.original);
+          if (signingKeys.revision > signingKeyRevision && saved &&
+              saved.replacement === rule.replacement &&
+              JSON.stringify(saved.allowedPackages) === JSON.stringify(rule.allowedPackages)) {
+            signingKeyRevision = signingKeys.revision;
+            signingKeyMode = "edit";
+            $("signing-key-title").textContent = "Edit Replacement";
+            $("signing-key-original").readOnly = true;
+            $("signing-key-replacement").readOnly = !!saved.replacement;
+          }
+        } catch {
+          // Preserve the save error if the refresh also fails.
+        }
+        notice("signing-key-error", err.message);
+      } finally {
+        $("signing-key-status").textContent = "";
+      }
+    });
+  };
   $("notifications-form").onsubmit = async (event) => {
     event.preventDefault();
     await runAction(async () => {
@@ -948,6 +1060,7 @@ if (typeof document !== "undefined") {
       !document.hidden &&
       !working &&
       !$("decision").open &&
+      !$("signing-key-dialog").open &&
       !$("audit-details").open &&
       !document.activeElement?.matches(
         'input, textarea, select, [contenteditable="true"]',

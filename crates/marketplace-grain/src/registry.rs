@@ -28,6 +28,8 @@ pub struct AdminSnapshot {
     pub busy: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications: Option<crate::notifications::Settings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_keys: Option<crate::replacements::Settings>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +59,7 @@ struct Release {
     version: u32,
     pin: String,
     ever_approved: bool,
+    key_error: Option<String>,
     metadata: Message,
     status: Message,
 }
@@ -69,6 +72,9 @@ impl Release {
 fn selected_releases(releases: &[Release]) -> Result<BTreeMap<&str, &Release>> {
     let mut selected = BTreeMap::<&str, &Release>::new();
     for release in releases {
+        if release.key_error.is_some() {
+            continue;
+        }
         let status = release.status.get_root::<s::submission_status::Reader>()?;
         if status.get_request_state()? != s::SubmissionState::Publish
             || !matches!(status.which()?, s::submission_status::Approved(_))
@@ -94,6 +100,7 @@ pub struct Registry {
     pub(crate) database: Arc<Database>,
 }
 pub(crate) struct PreparedUpload {
+    rules_revision: i64,
     file: tempfile::NamedTempFile,
     verified: Builder<capnp::message::HeapAllocator>,
 }
@@ -164,7 +171,9 @@ impl Registry {
         file.as_file().sync_all()?;
         crate::work::check_cancelled(cancelled)?;
         tracing::info!(bytes = file.as_file().metadata()?.len(), "Verifying SPK");
-        let verified = spk::verify_in_cancellable(file.path(), &self.root.join("tmp"), cancelled)?;
+        let rules = self.signing_key_rules()?;
+        let verified =
+            spk::verify_with_rules(file.path(), &self.root.join("tmp"), cancelled, &rules)?;
         crate::work::check_cancelled(cancelled)?;
         let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
         let metadata = info.get_metadata()?;
@@ -188,7 +197,11 @@ impl Registry {
         // Exercise the same metadata/image conversion used by publication before
         // committing the package. A valid signature does not imply valid text or enums.
         crate::catalog::parse(info, 0).context("invalid marketplace metadata")?;
-        Ok(PreparedUpload { file, verified })
+        Ok(PreparedUpload {
+            file,
+            verified,
+            rules_revision: rules.revision,
+        })
     }
     // Caller holds the registry gate; all state-dependent checks happen here.
     pub(crate) fn commit_upload(
@@ -197,7 +210,15 @@ impl Registry {
         cancelled: &AtomicBool,
     ) -> Result<String> {
         crate::work::check_cancelled(cancelled)?;
-        let PreparedUpload { file, verified } = prepared;
+        let PreparedUpload {
+            file,
+            verified,
+            rules_revision,
+        } = prepared;
+        ensure!(
+            self.signing_key_rules()?.revision == rules_revision,
+            "signing-key rules changed during verification; please submit again"
+        );
         let info = verified.get_root_as_reader::<p::verified_info::Reader>()?;
         let id = hex::encode(ids::package_bytes(info.get_package_id()?));
         let dest = self.package_dir(&id)?;
@@ -268,7 +289,13 @@ impl Registry {
         if self.database.contains(&id)? {
             let message = self.metadata(&id)?;
             let info = message.get_root::<p::verified_info::Reader>()?;
-            let key = ids::current_key(&ids::app_bytes(info.get_app_id()?))?;
+            ensure!(
+                self.key_error(&id)?.is_none(),
+                "package is blocked by signing-key rules"
+            );
+            let key = self
+                .signing_key_rules()?
+                .current_key(&ids::app_bytes(info.get_app_id()?))?;
             VerifyingKey::from_bytes(&key)?
                 .verify_strict(signed, &Signature::from_slice(signature)?)?;
             if let s::submission_request::SetState(change) = request.which()? {
@@ -330,6 +357,10 @@ impl Registry {
         );
         tracing::info!("Applying review decision");
         if action == "approve" || action == "rollback" {
+            ensure!(
+                self.key_error(id)?.is_none(),
+                "package is blocked by signing-key rules"
+            );
             let metadata = self.metadata(id)?;
             crate::catalog::parse(metadata.get_root()?, 0)
                 .context("invalid marketplace metadata")?;
@@ -500,6 +531,7 @@ impl Registry {
                     )?)
                 })?;
             releases.push(Release {
+                key_error: self.key_error(&id)?,
                 status,
                 ever_approved,
                 version: info.get_version(),
@@ -571,6 +603,8 @@ impl Registry {
     }
     #[tracing::instrument(skip_all, err(Debug))]
     pub fn publish(&self) -> Result<()> {
+        self.database
+            .read(|db| crate::replacements::remove_blocked_downloads(db, &self.root))?;
         self.audit_publication()?;
         let started = std::time::Instant::now();
         let releases = self.releases()?;
@@ -582,6 +616,9 @@ impl Registry {
             .collect();
         let mut newest_approved = BTreeMap::<&str, u32>::new();
         for release in &releases {
+            if release.key_error.is_some() {
+                continue;
+            }
             let status = release.status.get_root::<s::submission_status::Reader>()?;
             if status.get_request_state()? == s::SubmissionState::Publish
                 && matches!(status.which()?, s::submission_status::Approved(_))
@@ -606,6 +643,9 @@ impl Registry {
         let mut approved = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
         let mut pending = BTreeMap::<String, (AppSummary, AppDetailsForMarket)>::new();
         for release in &releases {
+            if release.key_error.is_some() {
+                continue;
+            }
             let id = &release.id;
             let status = release.status.get_root::<s::submission_status::Reader>()?;
             if status.reborrow().get_request_state()? != s::SubmissionState::Publish {
@@ -727,7 +767,10 @@ impl Registry {
             let entry = self
                 .catalog_entry(info, status.get_publish_date())
                 .map(|entry| (entry.app, entry.details));
-            let validation_error = entry.as_ref().err().map(|err| format!("{err:#}"));
+            let validation_error = release
+                .key_error
+                .clone()
+                .or_else(|| entry.as_ref().err().map(|err| format!("{err:#}")));
             // Keep releases with malformed stored metadata
             // visible so an approver can reject them and restore publication.
             let (mut app, details) = entry.unwrap_or_else(|_| {
@@ -1013,7 +1056,34 @@ mod upload_tests {
         info.set_version(version);
         let mut file = registry.temporary()?;
         file.write_all(b"already verified package")?;
-        Ok(PreparedUpload { file, verified })
+        Ok(PreparedUpload {
+            file,
+            verified,
+            rules_revision: registry.signing_key_rules()?.revision,
+        })
+    }
+
+    #[test]
+    fn upload_cannot_commit_after_rules_change() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let upload = prepared(&registry, 1)?;
+        registry.database.transaction(|db| {
+            db.execute(
+                "UPDATE registry_state SET key_rules_revision=key_rules_revision+1",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(
+            registry
+                .commit_upload(upload, &AtomicBool::new(false))
+                .unwrap_err()
+                .to_string()
+                .contains("rules changed")
+        );
+        assert!(registry.package_ids()?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]

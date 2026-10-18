@@ -34,6 +34,14 @@ pub(crate) fn verify_in_cancellable(
     scratch: &Path,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Builder<capnp::message::HeapAllocator>> {
+    verify_with_rules(path, scratch, cancelled, &crate::replacements::bundled()?)
+}
+pub(crate) fn verify_with_rules(
+    path: &Path,
+    scratch: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+    rules: &crate::replacements::Settings,
+) -> Result<Builder<capnp::message::HeapAllocator>> {
     let mut file = File::open(path)?;
     ensure!(
         file.metadata()?.len() <= SIZE_LIMIT,
@@ -95,7 +103,7 @@ pub(crate) fn verify_in_cancellable(
         hash.finalize().as_slice() == &signed_hash[64..],
         "SPK content does not match signature"
     );
-    let app = ids::canonical_app(&public_key, &package)?;
+    let app = rules.canonical_app(&public_key, &package)?;
     tracing::info!(
         decompressed_bytes = size,
         "SPK archive hash verified; reading manifest"

@@ -287,7 +287,7 @@ fn schema_upgrade_preserves_registry_and_defaults_to_disabled() -> Result<()> {
     let _registry = Registry::new(dir.path().into())?;
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        2
+        3
     );
     assert_eq!(
         db.query_row("SELECT state_revision FROM registry_state", [], |r| r

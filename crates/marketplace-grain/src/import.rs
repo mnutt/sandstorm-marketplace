@@ -11,6 +11,7 @@ use std::{
 
 pub const IMPORT_LIMIT: u64 = 16 * 1024 * 1024 * 1024;
 pub(crate) struct PreparedImport {
+    rules_revision: i64,
     _work: tempfile::TempDir,
     staged: Registry,
 }
@@ -42,6 +43,7 @@ impl Registry {
             fs::metadata(path)?.len() <= IMPORT_LIMIT,
             "import exceeds 16 GiB"
         );
+        let rules = self.signing_key_rules()?;
         let work = tempfile::tempdir_in(self.root.join("tmp"))?;
         let mut approved = None;
         let mut experimental = None;
@@ -102,6 +104,9 @@ impl Registry {
         let approved = approved.context("missing apps/index.json")?;
         let experimental = experimental.unwrap_or(AppIndexForMarket { apps: Vec::new() });
         let staged = Registry::new(work.path().join("registry"))?;
+        staged
+            .database
+            .transaction(|db| crate::replacements::write_rules(db, &rules))?;
         tracing::info!(
             approved = approved.apps.len(),
             experimental = experimental.apps.len(),
@@ -165,6 +170,7 @@ impl Registry {
         staged.publish()?;
         crate::work::check_cancelled(cancelled)?;
         Ok(PreparedImport {
+            rules_revision: rules.revision,
             _work: work,
             staged,
         })
@@ -175,7 +181,15 @@ impl Registry {
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<()> {
         crate::work::check_cancelled(cancelled)?;
-        let PreparedImport { _work, staged } = prepared;
+        let PreparedImport {
+            _work,
+            staged,
+            rules_revision,
+        } = prepared;
+        ensure!(
+            self.signing_key_rules()?.revision == rules_revision,
+            "signing-key rules changed during import; please try again"
+        );
         ensure!(self.package_ids()?.is_empty(), "grain is no longer empty");
         tracing::info!("Committing imported packages");
         let mut events = Vec::new();
@@ -228,6 +242,34 @@ mod tests {
     use super::*;
     use crate::database::{Change, encode};
 
+    #[test]
+    fn import_cannot_commit_after_rules_change() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let registry = Registry::new(dir.path().to_owned())?;
+        let work = tempfile::tempdir_in(registry.root.join("tmp"))?;
+        let prepared = PreparedImport {
+            rules_revision: registry.signing_key_rules()?.revision,
+            staged: Registry::new(work.path().join("registry"))?,
+            _work: work,
+        };
+        registry.database.transaction(|db| {
+            db.execute(
+                "UPDATE registry_state SET key_rules_revision=key_rules_revision+1",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(
+            registry
+                .commit_import(prepared, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap_err()
+                .to_string()
+                .contains("rules changed")
+        );
+        assert!(registry.package_ids()?.is_empty());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn import_rechecks_empty_registry_before_installing_staged_packages() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -235,6 +277,7 @@ mod tests {
         let work = tempfile::tempdir_in(registry.root.join("tmp"))?;
         let staged = Registry::new(work.path().join("registry"))?;
         let prepared = PreparedImport {
+            rules_revision: registry.signing_key_rules()?.revision,
             _work: work,
             staged,
         };

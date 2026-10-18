@@ -498,6 +498,52 @@ Admin app pages use `/<app_id>/` URLs. Navigation updates Sandstorm’s address 
 and reloading or reopening a link restores the selected app. Browser Back and
 Forward work between the app list and app pages.
 
+### App signing-key replacements
+
+Approvers can manage **App signing keys** on the administration home page. Use
+**New Replacement** below the table to add a rule, or **Edit** on a row to open
+its settings in a modal. Cancel or Escape closes an unsaved form. Rules
+are stored in SQLite and initially seeded from Sandstorm's bundled
+`appid-replacements.capnp` table. Adding or editing rules requires no marketplace
+package release. Subsequent marketplace upgrades preserve the configured rules.
+These rules are separate from deprecation links to a different app.
+
+A replacement key signs future SPKs and submission requests, while the original
+app ID remains the identity used for listings, package definitions, and PGP
+ownership assertions. **Sandstorm servers and packaging tools also need the
+matching replacement rules**; configuring this marketplace does not update them.
+
+By default, packages signed by the old key remain valid. Check **Revoke packages
+signed with the original key** to allow only the listed known-good package IDs;
+an empty list revokes all packages signed by that key. Revocation applies to the
+actual signing key, including intermediate keys in a rotation chain. A rule can
+revoke a key without providing a replacement. Unchecking revocation restores
+its package eligibility (and its submission authority if there is no replacement).
+Existing replacement mappings cannot be removed or redirected: to rotate again,
+add a rule from the current replacement key to the next key.
+
+Saving revalidates SPKs for apps whose identity or revocation eligibility changes,
+outside the registry write gate, then commits the rules, canonical identities, validation results, and audit events together.
+Invalid packages remain available for private review but cannot be approved or
+published. Public download links are durably removed before revocation commits,
+including links in publication recovery trees. The site is then rebuilt to update listings.
+If rebuilding fails, old listings may remain but revoked downloads stay unavailable;
+retry saving the same rule to rebuild without repeating verification or audit events.
+The modal reloads saved settings after a failed save so this retry uses the current
+revision. New rules cannot overwrite existing rules; use Edit for those.
+Verification in progress under outdated rules cannot commit; retry the upload or
+import in that case.
+Concurrent rule edits or changes to the package set require retrying the save.
+
+If a replacement key already has releases, their histories are combined under
+the original app ID, retaining provenance and the old audit records. Source-app
+rollback pins, deprecations, description overrides, or incoming deprecation links
+must be cleared or updated first, so merging identities cannot silently discard
+administrative decisions. Private rule changes and validation changes record
+the acting administrator. The rules table's **History** button shows the latest
+50 events for the canonical app; its app page provides paginated activity history.
+Rules are included in grain backups, but not in public catalog exports.
+
 ### Submission notification emails
 
 Approvers can configure **Submission notifications** on the administration home

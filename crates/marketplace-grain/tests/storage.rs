@@ -67,13 +67,40 @@ fn sqlite_initialization_restart_and_schema_version() -> Result<()> {
     let db = rusqlite::Connection::open(dir.path().join("marketplace.sqlite"))?;
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        2
+        3
     );
-    db.execute_batch("PRAGMA user_version=3")?;
+    db.execute_batch("PRAGMA user_version=4")?;
     assert!(Registry::new(dir.path().into()).is_err());
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        3
+        4
+    );
+    Ok(())
+}
+
+#[test]
+fn signing_rules_migrate_from_version_two_without_resetting_state() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = rusqlite::Connection::open(dir.path().join("marketplace.sqlite"))?;
+    db.execute_batch(include_str!("../src/schema.sql"))?;
+    db.execute_batch(include_str!("../src/notifications.sql"))?;
+    db.execute_batch("PRAGMA user_version=2; UPDATE registry_state SET state_revision=42; UPDATE notification_settings SET recipient='admin@example.org'")?;
+    let registry = Registry::new(dir.path().into())?;
+    let mut rules = registry.signing_key_rules()?.rules;
+    let mut expected = marketplace_grain::replacements::bundled()?.rules;
+    rules.sort_by(|a, b| a.original.cmp(&b.original));
+    expected.sort_by(|a, b| a.original.cmp(&b.original));
+    assert_eq!(rules, expected);
+    assert_eq!(
+        db.query_row("SELECT state_revision FROM registry_state", [], |r| r
+            .get::<_, i64>(0))?,
+        42
+    );
+    assert_eq!(
+        db.query_row("SELECT recipient FROM notification_settings", [], |r| {
+            r.get::<_, String>(0)
+        })?,
+        "admin@example.org"
     );
     Ok(())
 }

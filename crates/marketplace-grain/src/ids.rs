@@ -1,5 +1,5 @@
-use crate::{appid_replacements_capnp::APP_ID_REPLACEMENT_LIST, package_capnp as p};
-use anyhow::{Result, bail, ensure};
+use crate::package_capnp as p;
+use anyhow::{Result, ensure};
 const ALPHABET: &[u8] = b"0123456789acdefghjkmnpqrstuvwxyz";
 pub fn app_id(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -70,51 +70,4 @@ pub fn set_app(mut id: p::app_id::Builder<'_>, bytes: &[u8; 32]) {
 pub fn set_package(mut id: p::package_id::Builder<'_>, bytes: &[u8; 16]) {
     id.set_id0(u64::from_le_bytes(bytes[..8].try_into().unwrap()));
     id.set_id1(u64::from_le_bytes(bytes[8..].try_into().unwrap()));
-}
-pub fn canonical_app(key: &[u8; 32], package: &[u8; 16]) -> Result<[u8; 32]> {
-    let rules = APP_ID_REPLACEMENT_LIST.get()?;
-    let mut id = app_id(key);
-    for rule in rules {
-        if rule.get_original()?.to_str()? == id && rule.has_revoke_except_package_ids() {
-            ensure!(
-                rule.get_revoke_except_package_ids()?
-                    .iter()
-                    .any(|v| v.ok().and_then(|s| s.to_str().ok())
-                        == Some(hex::encode(package).as_str())),
-                "package signed with a revoked key"
-            );
-        }
-    }
-    for _ in 0..=rules.len() {
-        let mut next = None;
-        for rule in rules {
-            if rule.get_replacement()?.to_str()? == id {
-                next = Some(rule.get_original()?.to_str()?.to_string());
-                break;
-            }
-        }
-        match next {
-            Some(value) => id = value,
-            None => return parse_app_id(&id),
-        }
-    }
-    bail!("cyclic app ID replacement table")
-}
-pub fn current_key(canonical: &[u8; 32]) -> Result<[u8; 32]> {
-    let rules = APP_ID_REPLACEMENT_LIST.get()?;
-    let mut id = app_id(canonical);
-    for _ in 0..=rules.len() {
-        let mut next = None;
-        for rule in rules {
-            if rule.get_original()?.to_str()? == id {
-                next = Some(rule.get_replacement()?.to_str()?.to_string());
-                break;
-            }
-        }
-        match next {
-            Some(value) => id = value,
-            None => return parse_app_id(&id),
-        }
-    }
-    bail!("cyclic app ID replacement table")
 }
