@@ -343,6 +343,8 @@ uses Linux `renameat2(RENAME_EXCHANGE)` to switch generations when available.
 The intermediate catalog is rebuildable scratch data. After writing the entire
 public stage, the publisher flushes file contents with `fdatasync` and syncs each
 directory once, children before parents, before installing the generation.
+Unchanged content-addressed images are hard-linked from the installed site rather
+than rewritten; every page and index is still rebuilt.
 SQLite transactions, uploaded SPKs, and the final swap retain their durability
 barriers; no cache or incremental-rendering state is required.
 When Sandstorm or the filesystem does not support directory exchange, publication

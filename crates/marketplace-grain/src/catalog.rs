@@ -45,10 +45,19 @@ impl Entry<'_> {
             .collect()
     }
 
-    pub fn write_assets(&self, catalog: &Path) -> Result<()> {
+    pub fn write_assets(&self, catalog: &Path, previous: &Path) -> Result<()> {
         for asset in &self.assets {
             let path = catalog.join("images").join(&asset.name);
             if !path.exists() {
+                // Content-addressed images are immutable. Reuse their durable
+                // bytes without dirtying them again on every full catalog build.
+                let existing = previous.join("images").join(&asset.name);
+                if std::fs::symlink_metadata(&existing)
+                    .is_ok_and(|metadata| metadata.file_type().is_file())
+                    && std::fs::hard_link(&existing, &path).is_ok()
+                {
+                    continue;
+                }
                 std::fs::write(&path, asset.data)?;
             }
         }
@@ -226,7 +235,7 @@ mod tests {
         std::fs::create_dir(output.path().join("images"))?;
         assert_eq!(std::fs::read_dir(output.path().join("images"))?.count(), 0);
         assert_eq!(entry.details.screenshots[0].width, 640);
-        entry.write_assets(output.path())?;
+        entry.write_assets(output.path(), output.path())?;
         assert_eq!(
             std::fs::read(output.path().join("images").join(&entry.app.image_id))?,
             b"<svg/>"
@@ -239,6 +248,16 @@ mod tests {
                     .join(&entry.details.screenshots[0].image_id)
             )?,
             b"screenshot"
+        );
+        let next = tempfile::tempdir()?;
+        std::fs::create_dir(next.path().join("images"))?;
+        entry.write_assets(next.path(), output.path())?;
+        use std::os::unix::fs::MetadataExt;
+        let old = output.path().join("images").join(&entry.app.image_id);
+        let reused = next.path().join("images").join(&entry.app.image_id);
+        assert_eq!(
+            std::fs::metadata(old)?.ino(),
+            std::fs::metadata(reused)?.ino()
         );
         Ok(())
     }

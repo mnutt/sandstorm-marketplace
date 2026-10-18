@@ -596,6 +596,7 @@ impl Registry {
         // Rebuildable scratch data: the publisher flushes the completed public
         // tree before installing it. No intermediate per-file barriers are needed.
         let catalog = self.root.join("catalog");
+        let previous_publication = self.installed_directory();
         if catalog.exists() {
             fs::remove_dir_all(&catalog)?;
         }
@@ -628,7 +629,7 @@ impl Registry {
             };
             let entry =
                 self.catalog_entry(release.metadata.get_root()?, status.get_publish_date())?;
-            entry.write_assets(&catalog)?;
+            entry.write_assets(&catalog, &previous_publication)?;
             let (mut app, details) = (entry.app, entry.details);
             app.deprecation = deprecations.get(&app.app_id).cloned();
             fs::hard_link(
