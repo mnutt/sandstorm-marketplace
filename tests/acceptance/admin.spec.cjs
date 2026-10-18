@@ -124,6 +124,25 @@ test('refresh does not interrupt a rejection draft', async ({ page, request }) =
   await expect(page.getByLabel('Reason for the author')).toHaveValue('Draft review');
   await expect(page.locator('#decision')).toBeVisible();
 });
+test('refresh failures show readable messages instead of gateway HTML', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/admin/');
+  await expect(page.locator('#queue')).toContainText('Rust test app');
+  const html = '<!DOCTYPE html><title>Error 502</title><p>It appears Sandstorm is not running</p>';
+  for (const [status, expected] of [
+    [502, 'The marketplace is temporarily unavailable (HTTP 502). Please try again shortly.'],
+    [200, 'The marketplace returned an unexpected response. Please try again shortly.'],
+  ]) {
+    await page.route('**/admin/admin', route => route.fulfill({ status, contentType: 'text/html', body: html }));
+    await page.clock.fastForward(30001);
+    await expect(page.locator('#error')).toHaveText(`Could not refresh: ${expected}`);
+    await expect(page.locator('#queue')).toContainText('Rust test app');
+    await page.unroute('**/admin/admin');
+  }
+  await page.route('**/admin/admin', route => route.abort());
+  await page.clock.fastForward(30001);
+  await expect(page.locator('#error')).toHaveText('Could not refresh: Could not connect to the marketplace. Please try again shortly.');
+});
 test('refresh failure after a saved decision is visible on the page', async ({ page, request }) => {
   await page.goto('/admin/');
   await page.locator('#queue').getByRole('link', { name: 'Rust test app', exact: true }).click();

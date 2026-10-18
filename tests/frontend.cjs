@@ -23,6 +23,15 @@ test('static search combines category and case-insensitive text', () => {
 });
 
 const admin = require('../crates/marketplace-grain/src/review.js');
+test('request errors hide HTML pages and retain concise application errors', () => {
+  const html = '<!DOCTYPE html><title>Error 502</title><p>It appears Sandstorm is not running</p>';
+  assert.equal(admin.requestErrorMessage(502, html), 'The marketplace is temporarily unavailable (HTTP 502). Please try again shortly.');
+  assert.equal(admin.requestErrorMessage(400, 'Contact email required'), 'Contact email required');
+  assert.equal(admin.requestErrorMessage(403, '<html>Access denied</html>'), 'You do not have permission to perform this action.');
+  for (const body of [html, '<html>Proxy error</html>', 'x'.repeat(501), '']) {
+    assert.equal(admin.requestErrorMessage(400, body), 'The request could not be completed (HTTP 400). Please try again.');
+  }
+});
 function release(version, overrides = {}) {
   return { app: {appId: 'app-a', packageId: `package-${version}`, name: 'Test app', versionNumber: version}, review: 'pending', requestState: 'publish', contactEmail: 'author@example.com', ...overrides };
 }

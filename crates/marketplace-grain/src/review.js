@@ -1,4 +1,14 @@
 "use strict";
+function requestErrorMessage(status, body) {
+  if (status >= 500) {
+    return `The marketplace is temporarily unavailable (HTTP ${status}). Please try again shortly.`;
+  }
+  const message = body.trim();
+  // Preserve short application errors, but never display a proxy's HTML page.
+  if (message && message.length <= 500 && !/<[!/?a-z]/i.test(message)) return message;
+  if (status === 401 || status === 403) return "You do not have permission to perform this action.";
+  return `The request could not be completed (HTTP ${status}). Please try again.`;
+}
 function appIdFromPath(path) {
   return /^\/([0123456789acdefghjkmnpqrstuvwxyz]{52})\/?$/.exec(path)?.[1] || null;
 }
@@ -92,6 +102,7 @@ function auditEventLabel(event) {
 }
 if (typeof module !== "undefined")
   module.exports = {
+    requestErrorMessage,
     appIdFromPath,
     awaitingReview,
     groupApps,
@@ -142,14 +153,29 @@ if (typeof document !== "undefined") {
     $(id).hidden = !text;
   }
   async function request(path, body) {
-    const response = await fetch(
-      new URL(path, appBase),
-      body === undefined ? {} : { method: "POST", body },
-    );
-    if (!response.ok) throw new Error(await response.text());
+    let response;
+    try {
+      response = await fetch(
+        new URL(path, appBase),
+        body === undefined ? {} : { method: "POST", body },
+      );
+    } catch {
+      throw new Error("Could not connect to the marketplace. Please try again shortly.");
+    }
+    if (!response.ok) {
+      const body = response.status < 500 ? await response.text() : "";
+      throw new Error(requestErrorMessage(response.status, body));
+    }
     return response;
   }
-  const json = async (path) => (await request(path)).json();
+  const json = async (path) => {
+    const response = await request(path);
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("The marketplace returned an unexpected response. Please try again shortly.");
+    }
+  };
   const versionName = (item) =>
     `${item.app.version || "Unlabeled"} (build ${item.app.versionNumber})`;
   const date = (value) =>
