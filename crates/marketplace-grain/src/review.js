@@ -820,6 +820,10 @@ if (typeof document !== "undefined") {
       items = snapshot.releases;
       canApprove = snapshot.canApprove;
       keybaseConnected = !!snapshot.keybaseConnected;
+      $("keybase-connection-status").textContent = keybaseConnected
+        ? "Connected — a Keybase connection is saved for this marketplace."
+        : "Not connected.";
+      $("keybase").textContent = keybaseConnected ? "Reconnect Keybase" : "Connect Keybase";
       serverBusy = snapshot.busy;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
       if (canApprove && snapshot.signingKeys) {

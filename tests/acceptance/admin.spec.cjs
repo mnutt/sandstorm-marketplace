@@ -660,6 +660,12 @@ test('header tabs route independently and preserve navigation on reload', async 
 test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }) => {
   await page.route('**/admin/keybase-pb-descriptor', route => route.fulfill({ body: 'keybase-descriptor' }));
   let claimedToken;
+  await page.route('**/admin/admin', async route => {
+    const response = await route.fetch();
+    const snapshot = await response.json();
+    snapshot.keybaseConnected = !!claimedToken;
+    await route.fulfill({ response, json: snapshot });
+  });
   await page.route('**/admin/keybase-pb-token', route => {
     claimedToken = route.request().postData();
     return route.fulfill({ status: 204 });
@@ -674,6 +680,7 @@ test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }
     });
     window.postMessage({ rpcId: 'keybase-request', token: 'unsolicited' }, '*');
   });
+  await expect(page.locator('#keybase-connection-status')).toHaveText('Not connected.');
   await page.getByRole('button', { name: 'Connect Keybase', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.powerboxMessages)).toEqual([{
     rpcId: 'keybase-request', query: ['keybase-descriptor'], saveLabel: { defaultText: 'Keybase API' },
@@ -682,6 +689,11 @@ test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }
   await page.evaluate(() => window.postMessage({ rpcId: 'keybase-request', token: 'test-capability' }, '*'));
   await expect(page.locator('#keybase-status')).toContainText('Keybase connected.');
   expect(claimedToken).toBe('test-capability');
+  await expect(page.locator('#keybase-connection-status')).toContainText('Connected —');
+  await expect(page.getByRole('button', { name: 'Reconnect Keybase', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.locator('#keybase-connection-status')).toContainText('Connected —');
+  await expect(page.getByRole('button', { name: 'Reconnect Keybase', exact: true })).toBeVisible();
 });
 
 test('version history orders tags, identity, dates, and connected Keybase lookup', async ({ page, request }) => {
