@@ -544,10 +544,18 @@ the acting administrator. The rules table's **History** button shows the latest
 50 events for the canonical app; its app page provides paginated activity history.
 Rules are included in grain backups, but not in public catalog exports.
 
+### Keybase connection
+
+Approvers can use **Settings → Connect Keybase** to grant the marketplace access
+to the Keybase API through Sandstorm's Powerbox. The connection is saved per grain
+and reused for author lookups; reconnect if the capability is revoked or stops
+working. Releases with a verified PGP fingerprint offer **Look up author on
+Keybase** under **Package details & description**.
+
 ### Submission notification emails
 
-Approvers can configure **Submission notifications** on the administration home
-page with one administrator or distribution-list email address. The destination
+Approvers can configure **Settings → Notifications** with one administrator or
+distribution-list email address. The destination
 is stored per grain and defaults to unset. Leaving it blank disables email;
 there are no hardcoded recipients or app-level SMTP credentials. Messages use
 Sandstorm's email service and the grain's own sender address, so outbound email

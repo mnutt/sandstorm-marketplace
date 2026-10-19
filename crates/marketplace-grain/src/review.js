@@ -134,7 +134,10 @@ if (typeof document !== "undefined") {
   const appBase = new URL(".", document.currentScript.src);
   document.querySelector("base").href = appBase.href;
   const currentPath = () => `/${location.pathname.slice(appBase.pathname.length)}`;
-  const currentTab = () => /^(notifications|replacements)\/?$/.exec(currentPath().slice(1))?.[1] || "apps";
+  const currentTab = () => {
+    const tab = /^(settings|notifications|replacements)\/?$/.exec(currentPath().slice(1))?.[1];
+    return tab === "notifications" ? "settings" : tab || "apps";
+  };
   const currentAppId = () => appIdFromPath(currentPath());
   function syncSandstormPath() {
     if (window.parent !== window) {
@@ -774,7 +777,7 @@ if (typeof document !== "undefined") {
       if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
-    $("notifications").hidden = tab !== "notifications" || !canApprove;
+    $("settings").hidden = tab !== "settings" || !canApprove;
     $("signing-keys").hidden = tab !== "replacements" || !canApprove;
     $("catalog-heading").hidden = showingApp || tab !== "apps";
     $("catalog-view").hidden = showingApp || tab !== "apps";
@@ -913,7 +916,7 @@ if (typeof document !== "undefined") {
     auditView = null;
     render();
     syncSandstormPath();
-    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : currentTab() === "notifications" ? "#notifications-heading" : currentTab() === "replacements" ? "#signing-keys-heading" : "#catalog-heading h1");
+    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : currentTab() === "settings" ? "#settings-heading" : currentTab() === "replacements" ? "#signing-keys-heading" : "#catalog-heading h1");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
@@ -1026,6 +1029,31 @@ if (typeof document !== "undefined") {
       }
     });
   };
+  let keybaseRequestPending = false;
+  $("keybase").onclick = () => runAction(async () => {
+    const descriptor = await (await request("keybase-pb-descriptor")).text();
+    keybaseRequestPending = true;
+    $("keybase-status").textContent = "Choose a Keybase API connection in Sandstorm.";
+    window.parent.postMessage({ powerboxRequest: {
+      rpcId: "keybase-request", query: [descriptor],
+      saveLabel: { defaultText: "Keybase API" },
+    } }, "*");
+  });
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent || event.data?.rpcId !== "keybase-request" ||
+        !keybaseRequestPending || !canApprove) return;
+    keybaseRequestPending = false;
+    $("keybase-status").textContent = "";
+    if (event.data.error) {
+      notice("error", String(event.data.error));
+      return;
+    }
+    if (!event.data.token) return;
+    runAction(async () => {
+      await request("keybase-pb-token", event.data.token);
+      $("keybase-status").textContent = "Keybase connected. You can look up authors from their package details.";
+    });
+  });
   $("notifications-form").onsubmit = async (event) => {
     event.preventDefault();
     await runAction(async () => {

@@ -388,7 +388,7 @@ test('Public Page is hidden when only experimental releases remain', async ({ pa
 
 test('submission notification recipient defaults to unset and is approver-only', async ({ page, request }) => {
   await page.goto('/admin/notifications');
-  const settings = page.getByRole('region', { name: 'Submission notifications' });
+  const settings = page.getByRole('region', { name: 'Notifications' });
   await expect(settings).toBeVisible();
   await expect(page.getByLabel('Notification email')).toHaveValue('');
   await expect(page.locator('#notification-status')).toHaveText('Email notifications are disabled.');
@@ -625,13 +625,13 @@ test('header tabs route independently and preserve navigation on reload', async 
   await expect(page.locator('#pending-count')).toHaveText('1');
   await expect(page.locator('#notifications')).toBeHidden();
   await expect(page.locator('#signing-keys')).toBeHidden();
-  await tabs.getByRole('link', { name: 'Notifications', exact: true }).click();
-  await expect(page).toHaveURL(/\/admin\/notifications$/);
+  await tabs.getByRole('link', { name: 'Settings', exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/settings$/);
   await expect(page.locator('#notifications')).toBeVisible();
   await expect(page.locator('#catalog-view')).toBeHidden();
   await expect(apps).not.toHaveAttribute('aria-current', 'page');
   await page.reload();
-  await expect(tabs.getByRole('link', { name: 'Notifications', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(tabs.getByRole('link', { name: 'Settings', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('#notifications')).toBeVisible();
   await tabs.getByRole('link', { name: 'Key replacements', exact: true }).click();
   await expect(page.locator('#signing-keys')).toBeVisible();
@@ -648,11 +648,38 @@ test('header tabs route independently and preserve navigation on reload', async 
   await page.goto(`/admin/${app.appId}/`);
   await expect(apps).toHaveAttribute('aria-current', 'page');
   await expect(tabs.getByRole('link', { name: 'Public site' })).toHaveAttribute('href', 'http://127.0.0.1:9940/public/');
-  for (const route of ['notifications', 'replacements']) {
+  for (const route of ['settings', 'replacements']) {
     await page.goto(`/reviewer/${route}`);
     await expect(page.locator('#access-note')).toBeVisible();
     await expect(tabs.locator(`[data-tab="${route}"]`)).toBeHidden();
     await expect(page.locator('#notifications')).toBeHidden();
     await expect(page.locator('#signing-keys')).toBeHidden();
   }
+});
+
+test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }) => {
+  await page.route('**/admin/keybase-pb-descriptor', route => route.fulfill({ body: 'keybase-descriptor' }));
+  let claimedToken;
+  await page.route('**/admin/keybase-pb-token', route => {
+    claimedToken = route.request().postData();
+    return route.fulfill({ status: 204 });
+  });
+  await page.goto('/admin/settings');
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    window.powerboxMessages = [];
+    window.addEventListener('message', event => {
+      if (event.data?.powerboxRequest) window.powerboxMessages.push(event.data.powerboxRequest);
+    });
+    window.postMessage({ rpcId: 'keybase-request', token: 'unsolicited' }, '*');
+  });
+  await page.getByRole('button', { name: 'Connect Keybase', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.powerboxMessages)).toEqual([{
+    rpcId: 'keybase-request', query: ['keybase-descriptor'], saveLabel: { defaultText: 'Keybase API' },
+  }]);
+  expect(claimedToken).toBeUndefined();
+  await page.evaluate(() => window.postMessage({ rpcId: 'keybase-request', token: 'test-capability' }, '*'));
+  await expect(page.locator('#keybase-status')).toContainText('Keybase connected.');
+  expect(claimedToken).toBe('test-capability');
 });
