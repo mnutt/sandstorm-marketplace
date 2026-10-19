@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 — 2026-10-18
+
+- Added a Settings page containing Keybase connection and submission notification
+  settings. Existing Notifications URLs continue to work.
+- Restored Connect Keybase, with saved connection status and a reconnect option.
+- Made package IDs, receipt dates, and verified PGP fingerprints visible directly
+  in version history. Removed the expandable package details section in favor of
+  Preview listing.
+- Added inline Keybase author lookups beside verified fingerprints when connected,
+  showing author details and a profile image link in place of the lookup control.
+
 ## 0.4.0 — 2026-10-18
 
 - Added configurable email notifications for app submissions.
