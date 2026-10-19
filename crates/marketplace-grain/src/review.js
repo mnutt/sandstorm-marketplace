@@ -155,6 +155,8 @@ if (typeof document !== "undefined") {
   const pageSize = 25;
   let auditView = null;
   let publicBase = null;
+  let keybaseConnected = false;
+  const keybaseProfiles = new Map();
   let notificationSending = false;
   let notificationDirty = false;
   let signingKeys = { revision: 0, rules: [] };
@@ -294,18 +296,67 @@ if (typeof document !== "undefined") {
     $("decision").showModal();
     (action === "reject" ? $("decision-reason") : $("decision-cancel")).focus();
   }
+  function keybaseSummary(profile) {
+    const summary = element("span");
+    const fields = [];
+    for (const [field, label] of [
+      ["keybaseHandle", "Keybase"], ["name", "Name"], ["githubHandles", "GitHub"],
+      ["websites", "Websites"], ["twitterHandles", "Twitter"],
+      ["hackernewsHandles", "Hacker News"], ["redditHandles", "Reddit"],
+    ]) {
+      const value = profile[field];
+      const text = Array.isArray(value) ? value.join(", ") : value;
+      if (text) fields.push(`${label}: ${text}`);
+    }
+    summary.textContent = fields.join(", ");
+    if (profile.picture) {
+      try {
+        const url = new URL(profile.picture);
+        if (["https:", "http:"].includes(url.protocol)) {
+          const link = element("a", "Profile Image");
+          link.href = url.href;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          summary.append(fields.length ? ", " : "", link);
+        }
+      } catch { /* Omit malformed image URLs. */ }
+    }
+    if (!summary.hasChildNodes()) summary.textContent = "No profile details available.";
+    return summary;
+  }
   function release(item, versions) {
     const node = element("section", undefined, "release");
     const heading = element("div", undefined, "release-heading");
     heading.append(element("h3", versionName(item)));
     node.append(heading, badges(item));
+    node.append(element("p", `Package ID: ${item.app.packageId}`, "meta package-id"));
     node.append(
       element(
         "p",
         `Received: ${date(item.receivedAt)} · First published: ${item.publishedAt ? date(item.publishedAt * 1000) : "Never"}`,
-        "meta",
+        "meta release-dates",
       ),
     );
+    if (item.fingerprint) {
+      const fingerprint = element("p", `Verified PGP fingerprint: ${item.fingerprint}`, "meta pgp-fingerprint");
+      const results = element("span", undefined, "keybase-results");
+      results.setAttribute("aria-live", "polite");
+      const showProfile = () => {
+        const profile = keybaseProfiles.get(item.fingerprint);
+        if (profile) results.replaceChildren(keybaseSummary(profile));
+      };
+      if (canApprove && keybaseConnected && !keybaseProfiles.has(item.fingerprint)) {
+        const lookup = writeButton("Look up in Keybase", () => runAction(async () => {
+          const profile = await (await request(`keybase/${item.fingerprint}`, "")).json();
+          keybaseProfiles.set(item.fingerprint, profile);
+          showProfile();
+        }), "lookup-link");
+        results.append(lookup);
+      }
+      showProfile();
+      if (results.hasChildNodes()) fingerprint.append(" ", results);
+      node.append(fingerprint);
+    }
     if (item.validationError)
       node.append(
         element(
@@ -315,41 +366,6 @@ if (typeof document !== "undefined") {
         ),
       );
     if (item.reason) node.append(element("p", item.reason, "reason"));
-    const details = element("details");
-    details.dataset.key = `package-${item.app.packageId}`;
-    details.append(
-      element("summary", "Package details & description"),
-      element("p", `Package ID: ${item.app.packageId}`, "meta"),
-      element(
-        "p",
-        `Contact: ${item.contactEmail || "Not provided"} · License: ${item.details.license || "Not provided"}`,
-        "meta",
-      ),
-      element(
-        "pre",
-        item.details.description || "No description.",
-        "description",
-      ),
-    );
-    if (item.fingerprint) {
-      details.append(
-        element("p", `Verified PGP fingerprint: ${item.fingerprint}`, "meta"),
-      );
-      if (canApprove)
-        details.append(
-          writeButton("Look up author on Keybase", () =>
-            runAction(async () => {
-              const profile = await (
-                await request(`keybase/${item.fingerprint}`, "")
-              ).json();
-              details.append(
-                element("pre", JSON.stringify(profile, null, 2), "description"),
-              );
-            }),
-          ),
-        );
-    }
-    node.append(details);
     if (!item.validationError) {
       const preview = element("a", "Preview listing", "button secondary");
       preview.href = `preview/${encodeURIComponent(item.app.packageId)}`;
@@ -759,11 +775,6 @@ if (typeof document !== "undefined") {
     }
   }
   function render() {
-    const open = new Set(
-      [...document.querySelectorAll("details[open][data-key]")].map(
-        (node) => node.dataset.key,
-      ),
-    );
     const groups = publishedApps(items);
     const showingApp = !!currentAppId();
     const tab = currentTab();
@@ -784,11 +795,6 @@ if (typeof document !== "undefined") {
     $("app-detail").hidden = !showingApp;
     if (showingApp) {
       renderApp(groups);
-      document
-        .querySelectorAll("#app-detail details[data-key]")
-        .forEach((node) => {
-          node.open = open.has(node.dataset.key);
-        });
       updateControls();
       return;
     }
@@ -802,9 +808,6 @@ if (typeof document !== "undefined") {
       `${rows.length} app${rows.length === 1 ? "" : "s"} · Most recently published first · Refreshed ${new Date().toLocaleTimeString()}`;
     renderTable(rows);
     renderReviewQueue(pending, groups);
-    document.querySelectorAll("details[data-key]").forEach((node) => {
-      node.open = open.has(node.dataset.key);
-    });
     renderPagination(rows.length);
     updateControls();
   }
@@ -816,6 +819,7 @@ if (typeof document !== "undefined") {
       const snapshot = await json("admin");
       items = snapshot.releases;
       canApprove = snapshot.canApprove;
+      keybaseConnected = !!snapshot.keybaseConnected;
       serverBusy = snapshot.busy;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
       if (canApprove && snapshot.signingKeys) {
@@ -1051,7 +1055,8 @@ if (typeof document !== "undefined") {
     if (!event.data.token) return;
     runAction(async () => {
       await request("keybase-pb-token", event.data.token);
-      $("keybase-status").textContent = "Keybase connected. You can look up authors from their package details.";
+      await refresh();
+      $("keybase-status").textContent = "Keybase connected. You can look up authors in version history.";
     });
   });
   $("notifications-form").onsubmit = async (event) => {

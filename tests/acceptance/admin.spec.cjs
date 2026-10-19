@@ -683,3 +683,33 @@ test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }
   await expect(page.locator('#keybase-status')).toContainText('Keybase connected.');
   expect(claimedToken).toBe('test-capability');
 });
+
+test('version history orders tags, identity, dates, and connected Keybase lookup', async ({ page, request }) => {
+  const { app } = (await queue(request))[0];
+  const fingerprint = 'AB'.repeat(20);
+  let connected = false;
+  await page.route('**/admin/admin', async route => {
+    const response = await route.fetch();
+    const snapshot = await response.json();
+    snapshot.keybaseConnected = connected;
+    for (const item of snapshot.releases) item.fingerprint = fingerprint;
+    await route.fulfill({ response, json: snapshot });
+  });
+  await page.route(`**/admin/keybase/${fingerprint}`, route => route.fulfill({ json: {
+    keybaseHandle: 'example-author', name: '<script>not markup</script>', picture: 'https://example.org/avatar.png',
+    websites: ['example.org'], githubHandles: ['example'], twitterHandles: [],
+  } }));
+  await page.goto(`/admin/${app.appId}/`);
+  const version = page.locator('#app-detail .release').first();
+  await expect(version.locator('.package-id')).toBeVisible();
+  await expect(version.locator('.release-heading + div + .package-id + .release-dates + .pgp-fingerprint')).toHaveText(`Verified PGP fingerprint: ${fingerprint}`);
+  await expect(version.getByRole('button', { name: 'Look up in Keybase', exact: true })).toHaveCount(0);
+  connected = true;
+  await page.reload();
+  await version.getByRole('button', { name: 'Look up in Keybase', exact: true }).click();
+  const summary = version.locator('.pgp-fingerprint .keybase-results');
+  await expect(summary).toHaveText('Keybase: example-author, Name: <script>not markup</script>, GitHub: example, Websites: example.org, Profile Image');
+  await expect(summary.getByRole('link', { name: 'Profile Image' })).toHaveAttribute('href', 'https://example.org/avatar.png');
+  await expect(version.getByRole('button', { name: 'Look up in Keybase', exact: true })).toHaveCount(0);
+  await expect(version.locator('table, script, details')).toHaveCount(0);
+});

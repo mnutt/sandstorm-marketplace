@@ -26,6 +26,7 @@ pub struct AdminSnapshot {
     pub releases: Vec<ReviewRelease>,
     pub can_approve: bool,
     pub busy: bool,
+    pub keybase_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notifications: Option<crate::notifications::Settings>,
     #[serde(skip_serializing_if = "Option::is_none")]

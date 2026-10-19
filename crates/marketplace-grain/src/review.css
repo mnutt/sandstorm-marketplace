@@ -146,3 +146,7 @@ dialog .actions { justify-content: flex-end; }
 
 #signing-keys .app-history-link { padding: 0; border: 0; background: none; color: var(--accent); text-align: left; white-space: normal; text-decoration: underline; text-underline-offset: .15em; font-size: 1.125rem; }
 #signing-keys .app-history-link:hover { color: #5d246b; }
+
+.release .package-id, .release .pgp-fingerprint { margin: .35rem 0; }
+.lookup-link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
+.lookup-link:disabled { cursor: default; opacity: .6; }

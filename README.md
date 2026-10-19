@@ -180,7 +180,7 @@ independently of the table search; on narrow screens it moves below the table.
 Existing packages without receipt timestamps display “Not recorded”. The page
 refreshes automatically every 30 seconds when idle.
 
-Open **Package details & description** to inspect a release, then **Approve**,
+Open **Preview listing** to inspect a release, then **Approve**,
 **Reject / request update**, or **Return to review**. Each action explains its
 publication effect before confirmation. Rejection requires a reason, which the
 author can retrieve through submission status; no email is sent. Approving an
@@ -549,8 +549,9 @@ Rules are included in grain backups, but not in public catalog exports.
 Approvers can use **Settings → Connect Keybase** to grant the marketplace access
 to the Keybase API through Sandstorm's Powerbox. The connection is saved per grain
 and reused for author lookups; reconnect if the capability is revoked or stops
-working. Releases with a verified PGP fingerprint offer **Look up author on
-Keybase** under **Package details & description**.
+working. When Keybase is connected, releases with a verified PGP fingerprint offer
+**Look up in Keybase** beside the fingerprint in version history. Lookup results
+replace the link with inline author details and a profile image link, when available.
 
 ### Submission notification emails
 

@@ -15,6 +15,16 @@ use capnp::{capability::Promise, message::Builder, serialize_packed, traits::Has
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 
+pub fn connected(registry: &Registry) -> Result<bool> {
+    registry.database.read(|db| {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM capabilities WHERE name='keybase')",
+            [],
+            |row| row.get(0),
+        )?)
+    })
+}
+
 pub fn descriptor() -> Result<String> {
     let mut message = Builder::new_default();
     let mut tag = message

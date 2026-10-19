@@ -119,6 +119,7 @@ impl web::Server for Session {
                             releases: registry.queue()?,
                             can_approve,
                             busy: registry.is_busy(),
+                            keybase_connected: can_approve && crate::keybase::connected(&registry)?,
                             signing_keys: if can_approve { Some(registry.signing_key_rules()?) } else { None },
                             notifications: if can_approve { Some(crate::notifications::settings(&registry)?) } else { None },
                         };
