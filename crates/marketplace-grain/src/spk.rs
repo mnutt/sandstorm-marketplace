@@ -203,6 +203,42 @@ fn read_archive(
     ))
 }
 
+// Issuer metadata only selects candidate self-signatures; it never establishes
+// validity. Keep signatures with no issuer so they must pass cryptographic
+// verification too. Match rPGP's candidate selection (key ID OR fingerprint).
+fn could_be_self_signature(
+    signature: &pgp::packet::Signature,
+    key: &impl pgp::types::KeyDetails,
+) -> bool {
+    let ids = signature.issuer_key_id();
+    let fingerprints = signature.issuer_fingerprint();
+    (ids.is_empty() && fingerprints.is_empty())
+        || ids.iter().any(|id| **id == key.legacy_key_id())
+        || fingerprints.iter().any(|fp| **fp == key.fingerprint())
+}
+
+fn verify_pgp_bindings(key: &mut pgp::composed::SignedPublicKey) -> Result<()> {
+    // A transferable public key may include other people's certifications of
+    // its user IDs/attributes. They are not self-signatures and do not establish
+    // author ownership. rPGP's verify_bindings expects only self-signatures.
+    // Remove only explicitly foreign certifications, not failed signatures.
+    // Keep each user/attribute even if filtering empties its signatures: the
+    // binding verifier must reject it for lacking a self-certification.
+    for user in &mut key.details.users {
+        user.signatures
+            .retain(|sig| could_be_self_signature(sig, &key.primary_key));
+    }
+    for attribute in &mut key.details.user_attributes {
+        attribute
+            .signatures
+            .retain(|sig| could_be_self_signature(sig, &key.primary_key));
+    }
+    // Direct-key signatures, revocations, subkey bindings, and signing-subkey
+    // back signatures still go through the existing cryptographic checks.
+    key.verify_bindings()
+        .context("verifying OpenPGP self-certifications and key bindings")
+}
+
 fn verify_pgp(app_id: &str, signature: &[u8], keyring: &[u8]) -> Result<String> {
     use pgp::{
         composed::{Deserializable, Message, SignedPublicKey},
@@ -228,8 +264,8 @@ fn verify_pgp(app_id: &str, signature: &[u8], keyring: &[u8]) -> Result<String> 
         .context("parsing OpenPGP author keyring (binary or ASCII armor)")?
         .0
     {
-        let key = key?;
-        key.verify_bindings()?;
+        let mut key = key?;
+        verify_pgp_bindings(&mut key)?;
         if message.verify(&key).is_ok()
             || key
                 .public_subkeys
@@ -253,6 +289,109 @@ mod tests {
     const KEY: &[u8] = include_bytes!("../tests/fixtures/pgp/keybase-public-key.pgp");
     const APP: &str = "zxent02jw0z9ckkagz1uscdxesaf1f1wgzdunx2wrcj0jt9uf9rh";
     const FINGERPRINT: &str = "7116FC1150C0C96EF251B9A89324AC3921F3DE70";
+
+    const MEDIAWIKI_KEY: &[u8] = include_bytes!("../tests/fixtures/pgp/mediawiki-public-key.pgp");
+    const MEDIAWIKI_PROOF: &[u8] = include_bytes!("../tests/fixtures/pgp/mediawiki-proof.pgp");
+    const MEDIAWIKI_APP: &str = "p04q48xd2kgkystkrda5n77kdns6u569wnactgh904tf7s3vev70";
+    const MEDIAWIKI_FINGERPRINT: &str = "C0B2C432638DAEB0D70715C7F654B8C7D4CA3CB8";
+
+    #[test]
+    fn author_key_accepts_third_party_certifications_without_trusting_them() -> Result<()> {
+        use pgp::{ser::Serialize, types::KeyDetails};
+        let mut key = SignedPublicKey::from_bytes(MEDIAWIKI_KEY)?;
+        // Reproduce the original failure against the unmodified real keyring.
+        assert!(
+            key.verify_bindings()
+                .unwrap_err()
+                .to_string()
+                .contains("No matching issuer")
+        );
+        assert_eq!(
+            verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, MEDIAWIKI_KEY)?,
+            MEDIAWIKI_FINGERPRINT
+        );
+        verify_pgp_bindings(&mut key)?;
+        assert_eq!(key.details.users[0].signatures.len(), 1);
+        assert_eq!(
+            hex::encode_upper(key.fingerprint().as_bytes()),
+            MEDIAWIKI_FINGERPRINT
+        );
+        assert_eq!(
+            verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &key.to_bytes()?)?,
+            MEDIAWIKI_FINGERPRINT
+        );
+
+        // Endorsements by other keys cannot replace the owner's certification.
+        let mut foreign_only = SignedPublicKey::from_bytes(MEDIAWIKI_KEY)?;
+        foreign_only.details.users[0].signatures.remove(0);
+        assert!(!foreign_only.details.users[0].signatures.is_empty());
+        assert!(verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &foreign_only.to_bytes()?).is_err());
+        // Neither a different author key nor a different app can use this proof.
+        assert!(verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, KEY).is_err());
+        assert!(verify_pgp(APP, MEDIAWIKI_PROOF, MEDIAWIKI_KEY).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn author_key_still_rejects_corrupted_certifications_bindings_and_proof() -> Result<()> {
+        use pgp::ser::Serialize;
+        let key = SignedPublicKey::from_bytes(MEDIAWIKI_KEY)?;
+        for signature in [
+            &key.details.users[0].signatures[0],
+            &key.public_subkeys[0].signatures[0],
+        ] {
+            // Alter the RSA signature value, leaving packet structure and issuer
+            // metadata intact. Both signatures are required even with endorsements.
+            let signature = signature.to_bytes()?;
+            let mut bytes = key.to_bytes()?;
+            let offset = bytes
+                .windows(signature.len())
+                .position(|w| w == signature)
+                .unwrap();
+            bytes[offset + signature.len() - 1] ^= 1;
+            assert!(SignedPublicKey::from_bytes(&bytes[..]).is_ok());
+            assert!(verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &bytes).is_err());
+        }
+        let mut proof = MEDIAWIKI_PROOF.to_vec();
+        let last = proof.len() - 1;
+        proof[last] ^= 1;
+        assert!(verify_pgp(MEDIAWIKI_APP, &proof, MEDIAWIKI_KEY).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn author_self_certification_handles_absent_and_fingerprint_issuers() -> Result<()> {
+        use pgp::{
+            packet::{Subpacket, SubpacketData},
+            ser::Serialize,
+            types::KeyDetails,
+        };
+        let mut key = SignedPublicKey::from_bytes(MEDIAWIKI_KEY)?;
+        let fingerprint = key.fingerprint();
+        // This fixture's self-signature has just an unhashed issuer key ID.
+        let sig = &mut key.details.users[0].signatures[0];
+        sig.unhashed_subpacket_remove(0)?;
+        assert!(sig.issuer_key_id().is_empty() && sig.issuer_fingerprint().is_empty());
+        assert_eq!(
+            verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &key.to_bytes()?)?,
+            MEDIAWIKI_FINGERPRINT
+        );
+        key.details.users[0].signatures[0].unhashed_subpacket_push(Subpacket::regular(
+            SubpacketData::IssuerFingerprint(fingerprint),
+        )?)?;
+        assert_eq!(
+            verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &key.to_bytes()?)?,
+            MEDIAWIKI_FINGERPRINT
+        );
+        // Claiming the owner's fingerprint cannot turn a foreign signature into
+        // a valid self-certification; the RSA check must still reject it.
+        let fingerprint = key.fingerprint();
+        key.details.users[0].signatures[1].unhashed_subpacket_push(Subpacket::regular(
+            SubpacketData::IssuerFingerprint(fingerprint),
+        )?)?;
+        assert!(verify_pgp(MEDIAWIKI_APP, MEDIAWIKI_PROOF, &key.to_bytes()?).is_err());
+        Ok(())
+    }
 
     #[test]
     fn archive_reader_accepts_many_segments_and_bounds_lengths() -> Result<()> {
