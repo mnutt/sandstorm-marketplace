@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Added direct import of one or more SPK packages from the administration UI,
+  including into existing marketplaces. Packages are verified and submitted for
+  publication; new releases require approval and existing review decisions are
+  preserved. Imports show per-file results and continue if a file fails.
+- Added activity history and submission notifications for imported packages that
+  change the publication request.
+- Added a Web publishing section with a public preview link and custom-domain DNS
+  instructions, including guidance for root domains.
+- Renamed the Settings tab to Setup. Existing Settings and Notifications URLs
+  continue to work.
+
 ## 0.4.1 — 2026-10-18
 
 - Added a Settings page containing Keybase connection and submission notification
