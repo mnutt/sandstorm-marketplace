@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-10-21
 
 - Added direct import of one or more SPK packages from the administration UI,
   including into existing marketplaces. Packages are verified and submitted for
