@@ -81,17 +81,20 @@ cargo xtask package --test-key
 ```
 
 This uses a fixed **public** test signing key, labels the app **Sandstorm
-Marketplace (Test)**, and neither reads nor writes `.local` signing files. It
+Marketplace (Test)**, and never accesses the production keyring. It
 has a separate app identity from normal builds. Anyone can sign updates for the
 test identity; do not use it for production or sensitive data.
 
 The result is `build/marketplace.spk`. The Rust packager builds the grain, stages
 its executable and shared system libraries, constructs the manifest, and signs
-and compresses the SPK. A signing identity is created in
-`.local/marketplace.keyring`, with its app ID in `.local/app-id`. Keep both files
-for future updates; they are ignored by Git and excluded from the package.
-Existing SDK-format signing keys are preserved. An incomplete or mismatched
-identity causes packaging to fail instead of silently changing the app ID.
+and compresses the SPK. Production builds select the marketplace's existing app
+key (`3theazdrcs30r9qysmh6ks0vndm3z4xkuk6k9qmu506h7mamvqg0`) from
+`~/.sandstorm/sandstorm-keyring`, the shared keyring used by spktool. Override
+that path with `cargo xtask package --keyring /path/to/keyring`. Keys are read
+only; a missing or inconsistent key fails packaging instead of creating a new
+app identity. Keep a backup of your shared keyring.
+
+Signing keys are excluded from Git and the package.
 
 Packaging reports separate timings for build/staging, archive/signing, XZ
 compression, and verification. Compression uses up to four CPU workers with

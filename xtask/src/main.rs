@@ -23,9 +23,12 @@ enum Task {
         contact_email: String,
         #[arg(long)]
         debug: bool,
-        /// Sign with a fixed PUBLIC test key; never reads or writes .local identity.
-        #[arg(long)]
+        /// Sign with a fixed PUBLIC test key; never reads the production keyring.
+        #[arg(long, conflicts_with = "keyring")]
         test_key: bool,
+        /// SDK-format signing keyring (default: ~/.sandstorm/sandstorm-keyring).
+        #[arg(long)]
+        keyring: Option<PathBuf>,
         #[arg(long, default_value_t = package::APP_VERSION)]
         app_version: u32,
         #[arg(long, default_value = package::MARKETING_VERSION)]
@@ -74,6 +77,7 @@ fn main() -> Result<()> {
             contact_email,
             debug,
             test_key,
+            keyring,
             app_version,
             marketing_version,
         } => package::package(
@@ -82,6 +86,7 @@ fn main() -> Result<()> {
             debug,
             &package::Release {
                 test_key,
+                keyring,
                 app_version,
                 marketing_version,
             },

@@ -2,23 +2,24 @@ use anyhow::{Context, Result, ensure};
 use capnp::{message::Builder, serialize};
 use ed25519_dalek::{Signer, SigningKey};
 use marketplace_grain::{ids, package_capnp as p, spk};
-use rand::TryRng;
 use sha2::{Digest, Sha512};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Write,
+    fs::{self, File},
+    io::{BufReader, Write},
     num::NonZeroU64,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::Path,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
 };
 
+pub const APP_ID: &str = "3theazdrcs30r9qysmh6ks0vndm3z4xkuk6k9qmu506h7mamvqg0";
 pub const APP_VERSION: u32 = 9;
 pub const MARKETING_VERSION: &str = "0.4.3";
 
 pub struct Release {
     pub test_key: bool,
+    pub keyring: Option<PathBuf>,
     pub app_version: u32,
     pub marketing_version: String,
 }
@@ -26,71 +27,57 @@ impl Default for Release {
     fn default() -> Self {
         Self {
             test_key: false,
+            keyring: None,
             app_version: APP_VERSION,
             marketing_version: MARKETING_VERSION.into(),
         }
     }
 }
-fn signing_key(root: &Path, test_key: bool) -> Result<SigningKey> {
-    if test_key {
-        // Intentionally public and stable. This identity is ONLY for disposable
-        // test builds: anyone can sign updates for it. Production uses .local.
+fn signing_key(release: &Release) -> Result<SigningKey> {
+    if release.test_key {
+        // Intentionally public and stable. Never access the production keyring.
         Ok(SigningKey::from_bytes(&[0x54; 32]))
     } else {
-        identity(root)
+        let keyring = match &release.keyring {
+            Some(path) => path.clone(),
+            None => {
+                PathBuf::from(std::env::var_os("HOME").context("HOME is unset; supply --keyring")?)
+                    .join(".sandstorm/sandstorm-keyring")
+            }
+        };
+        identity(&keyring, APP_ID)
     }
 }
 
-fn identity(root: &Path) -> Result<SigningKey> {
-    let dir = root.join(".local");
-    fs::create_dir_all(&dir)?;
-    let keyring = dir.join("marketplace.keyring");
-    let id_file = dir.join("app-id");
-    ensure!(
-        keyring.exists() == id_file.exists(),
-        "Signing identity is incomplete; restore .local/marketplace.keyring and .local/app-id before packaging"
-    );
-    if keyring.exists() {
-        let message = serialize::read_message(File::open(&keyring)?, spk::limits(1024))?;
+fn identity(keyring: &Path, app_id: &str) -> Result<SigningKey> {
+    let expected = ids::parse_app_id(app_id)?;
+    let mut file = BufReader::new(File::open(keyring).with_context(|| {
+        format!(
+            "opening signing keyring {} (override with --keyring)",
+            keyring.display()
+        )
+    })?);
+    let mut found = None;
+    // SDK keyrings concatenate KeyFile messages. Select by public identity,
+    // never by position, and never generate a replacement for a missing key.
+    while let Some(message) = serialize::try_read_message(&mut file, spk::limits(1024))? {
         let key = message.get_root::<p::key_file::Reader>()?;
+        if key.get_public_key()? != expected {
+            continue;
+        }
         let private = key.get_private_key()?;
-        ensure!(private.len() == 64, "invalid private key length");
+        ensure!(
+            private.len() == 64,
+            "invalid private key length for marketplace app"
+        );
         let signing = SigningKey::from_bytes(private[..32].try_into()?);
         ensure!(
-            key.get_public_key()? == signing.verifying_key().as_bytes()
-                && &private[32..] == signing.verifying_key().as_bytes(),
-            "inconsistent signing key"
+            signing.verifying_key().as_bytes() == &expected && private[32..] == expected,
+            "inconsistent marketplace signing key"
         );
-        ensure!(
-            fs::read_to_string(id_file)?.trim() == ids::app_id(signing.verifying_key().as_bytes()),
-            "app ID does not match signing key"
-        );
-        Ok(signing)
-    } else {
-        let mut seed = [0; 32];
-        rand::rngs::SysRng
-            .try_fill_bytes(&mut seed)
-            .context("generating signing key entropy")?;
-        let key = SigningKey::from_bytes(&seed);
-        let mut private = seed.to_vec();
-        private.extend_from_slice(key.verifying_key().as_bytes());
-        let mut message = Builder::new_default();
-        let mut value = message.init_root::<p::key_file::Builder>();
-        value.set_public_key(key.verifying_key().as_bytes());
-        value.set_private_key(&private);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(keyring)?;
-        serialize::write_message(&mut file, &message)?;
-        file.sync_all()?;
-        fs::write(
-            id_file,
-            format!("{}\n", ids::app_id(key.verifying_key().as_bytes())),
-        )?;
-        Ok(key)
+        found = Some(signing);
     }
+    found.with_context(|| format!("marketplace app key {app_id} not found in {}; restore/import the existing key or supply --keyring", keyring.display()))
 }
 fn manifest(email: &str, release: &Release) -> Result<Vec<u8>> {
     let mut message = Builder::new_default();
@@ -261,11 +248,11 @@ pub fn prepare_dev(root: &Path) -> Result<()> {
 
 pub fn package(root: &Path, email: &str, debug: bool, release: &Release) -> Result<()> {
     let started = Instant::now();
+    let signing = signing_key(release)?;
     let staged = stage(root, email, debug, release)?;
     println!("Build and staging finished in {:.2?}", started.elapsed());
     let archive_started = Instant::now();
     let stage = staged.path();
-    let signing = signing_key(root, release.test_key)?;
     let mut archive = Builder::new_default();
     let count = fs::read_dir(stage)?.count();
     files(
@@ -328,6 +315,71 @@ pub fn package(root: &Path, email: &str, debug: bool, release: &Release) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn key_record(seed: u8) -> Result<(SigningKey, Vec<u8>)> {
+        let signing = SigningKey::from_bytes(&[seed; 32]);
+        let public = signing.verifying_key();
+        let mut private = signing.to_bytes().to_vec();
+        private.extend_from_slice(public.as_bytes());
+        let mut message = Builder::new_default();
+        let mut record = message.init_root::<p::key_file::Builder>();
+        record.set_public_key(public.as_bytes());
+        record.set_private_key(&private);
+        let mut bytes = Vec::new();
+        serialize::write_message(&mut bytes, &message)?;
+        Ok((signing, bytes))
+    }
+
+    #[test]
+    fn shared_keyring_selects_by_app_id_without_modifying_keys() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("keyring");
+        let (first, mut bytes) = key_record(1)?;
+        let (second, other) = key_record(2)?;
+        bytes.extend(other);
+        fs::write(&path, &bytes)?;
+        for expected in [first, second] {
+            let id = ids::app_id(expected.verifying_key().as_bytes());
+            let selected = identity(&path, &id)?;
+            assert_eq!(selected.verifying_key(), expected.verifying_key());
+        }
+        assert!(identity(&path, APP_ID).is_err());
+        assert_eq!(fs::read(&path)?, bytes);
+        let missing = root.path().join("absent");
+        assert!(identity(&missing, APP_ID).is_err());
+        assert!(!missing.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_keyring_rejects_inconsistent_keys_and_truncated_records() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("keyring");
+        let (signing, bytes) = key_record(3)?;
+        let id = ids::app_id(signing.verifying_key().as_bytes());
+        let reader = serialize::read_message(bytes.as_slice(), spk::limits(1024))?;
+        for offset in [0, 32] {
+            let mut message = Builder::new_default();
+            message.set_root(reader.get_root::<p::key_file::Reader>()?)?;
+            message
+                .get_root::<p::key_file::Builder>()?
+                .get_private_key()?[offset] ^= 1;
+            serialize::write_message(File::create(&path)?, &message)?;
+            assert!(identity(&path, &id).is_err());
+        }
+        let mut truncated = bytes.clone();
+        truncated.extend_from_slice(&bytes[..bytes.len() - 1]);
+        fs::write(&path, truncated)?;
+        assert!(identity(&path, &id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn production_identity_matches_sdk_package_definition() {
+        assert!(
+            include_str!("../../sandstorm-pkgdef.capnp").contains(&format!("id = \"{APP_ID}\""))
+        );
+    }
+
     #[test]
     fn ci_test_identity_is_stable_and_does_not_touch_production_keys() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -336,25 +388,22 @@ mod tests {
             root.path().join(".local/marketplace.keyring"),
             b"do not read or replace",
         )?;
-        let first = signing_key(root.path(), true)?;
-        let second = signing_key(root.path(), true)?;
+        let release = Release {
+            test_key: true,
+            keyring: Some(root.path().join(".local/marketplace.keyring")),
+            app_version: 123,
+            marketing_version: "v1.2.3 (test)".into(),
+        };
+        let first = signing_key(&release)?;
+        let second = signing_key(&release)?;
         ensure!(
             first.verifying_key() == second.verifying_key(),
             "test identity changed"
         );
         ensure!(
-            fs::read(root.path().join(".local/marketplace.keyring"))? == b"do not read or replace",
+            fs::read(release.keyring.as_ref().unwrap())? == b"do not read or replace",
             "production key changed"
         );
-        ensure!(
-            !root.path().join(".local/app-id").exists(),
-            "test build wrote a production identity"
-        );
-        let release = Release {
-            test_key: true,
-            app_version: 123,
-            marketing_version: "v1.2.3 (test)".into(),
-        };
         let bytes = manifest("ci@example.invalid", &release)?;
         let message = serialize::read_message(&mut bytes.as_slice(), spk::limits(4096))?;
         let manifest = message.get_root::<p::manifest::Reader>()?;

@@ -3988,7 +3988,6 @@ dependencies = [
  "libc",
  "lzma-rust2",
  "marketplace-grain",
- "rand 0.10.3",
  "regex",
  "serde_json",
  "sha2 0.11.1",
