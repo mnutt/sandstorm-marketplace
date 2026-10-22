@@ -1294,3 +1294,104 @@ fn audit_resubmissions_record_fresh_intent_but_not_status_checks_or_retries() ->
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn spk_import_requests_publication_and_preserves_review_and_author_control()
+-> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let registry = Registry::new(dir.path().to_owned())?;
+    let view: ui_view::Client = capnp_rpc::new_client(View {
+        registry: registry.clone(),
+        platform: Rc::new(RefCell::new(None)),
+    });
+    let admin = session(&view, &[true, true, false], false).await?;
+    let reviewer = session(&view, &[false, true, false], false).await?;
+    let api = session(&view, &[false, false, true], true).await?;
+    for client in [&reviewer, &api] {
+        assert!(!matches!(
+            post(client, "import-spk", &package(1))
+                .await?
+                .get()?
+                .which()?,
+            web::response::NoContent(_)
+        ));
+        let mut call = client.post_streaming_request();
+        call.get().set_path("import-spk");
+        assert!(call.send().promise.await.is_err());
+    }
+    assert!(registry.package_ids()?.is_empty());
+    assert!(matches!(
+        post(&admin, "import-spk", b"invalid SPK")
+            .await?
+            .get()?
+            .which()?,
+        web::response::ClientError(_)
+    ));
+    assert!(registry.package_ids()?.is_empty());
+    assert!(matches!(
+        post(&admin, "import-spk", &package(1))
+            .await?
+            .get()?
+            .which()?,
+        web::response::NoContent(_)
+    ));
+    let id = registry.package_ids()?.remove(0);
+    let status = registry.status(&id)?;
+    let status = status.get_root::<s::submission_status::Reader>()?;
+    assert_eq!(status.get_request_state()?, s::SubmissionState::Publish);
+    assert!(matches!(status.which()?, s::submission_status::Pending(_)));
+    assert_eq!(status.get_publish_date(), 0);
+    registry.review(&id, "approve", "")?;
+    let published = registry
+        .status(&id)?
+        .get_root::<s::submission_status::Reader>()?
+        .get_publish_date();
+    assert!(published > 0);
+    // Retrying must preserve approval and publication history.
+    assert!(matches!(
+        post(&admin, "import-spk", &package(1))
+            .await?
+            .get()?
+            .which()?,
+        web::response::NoContent(_)
+    ));
+    let status = registry.status(&id)?;
+    let status = status.get_root::<s::submission_status::Reader>()?;
+    assert!(matches!(status.which()?, s::submission_status::Approved(_)));
+    assert_eq!(status.get_publish_date(), published);
+    // Signed author requests still work after an admin import.
+    registry.submission(&request(&id, Some(s::SubmissionState::Ignore), 0))?;
+    assert_eq!(
+        registry
+            .status(&id)?
+            .get_root::<s::submission_status::Reader>()?
+            .get_request_state()?,
+        s::SubmissionState::Ignore
+    );
+    // Stream another release into a populated marketplace.
+    let data = package(2);
+    let mut call = admin.post_streaming_request();
+    call.get().set_path("import-spk");
+    call.get().set_expected_size(data.len() as u64);
+    let stream = call.send().promise.await?.get()?.get_stream()?;
+    let response = stream.get_response_request().send().promise;
+    let bytes: byte_stream::Client = cast(stream);
+    for chunk in data.chunks(97) {
+        let mut write = bytes.write_request();
+        write.get().set_data(chunk);
+        write.send().await?;
+    }
+    bytes.done_request().send().promise.await?;
+    assert!(matches!(
+        response.await?.get()?.which()?,
+        web::response::NoContent(_)
+    ));
+    let ids = registry.package_ids()?;
+    assert_eq!(ids.len(), 2);
+    let next = ids.iter().find(|other| **other != id).unwrap();
+    let status = registry.status(next)?;
+    let status = status.get_root::<s::submission_status::Reader>()?;
+    assert_eq!(status.get_request_state()?, s::SubmissionState::Publish);
+    assert!(matches!(status.which()?, s::submission_status::Pending(_)));
+    Ok(())
+}

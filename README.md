@@ -219,6 +219,15 @@ or loses approval, the latest eligible approved release is used instead. The
 selection takes effect again if that release becomes eligible, until cleared.
 If final publication fails after a decision is saved, retrying the decision or restarting the grain retries publication from stored state.
 
+## Import SPK files
+
+Approvers can use **Setup → Import SPK packages** in the grain's administration UI to
+select one or more `.spk` files, including in an existing marketplace. Each file
+is verified and submitted for publication as with `spk publish`: new releases
+await approval, and existing review decisions are preserved. Each SPK may be up
+to 1 GiB. Files are processed individually; a failed file does not undo successful
+imports or prevent the remaining files from being tried. Results appear per file.
+
 ## Sync to a tarball, then upload
 
 Run these commands from the repository root. First install the marketplace SPK
@@ -546,7 +555,7 @@ Rules are included in grain backups, but not in public catalog exports.
 
 ### Keybase connection
 
-Approvers can use **Settings → Connect Keybase** to grant the marketplace access
+Approvers can use **Setup → Connect Keybase** to grant the marketplace access
 to the Keybase API through Sandstorm's Powerbox. The connection is saved per grain
 and reused for author lookups; reconnect if the capability is revoked or stops
 working. When Keybase is connected, releases with a verified PGP fingerprint offer
@@ -555,7 +564,7 @@ replace the link with inline author details and a profile image link, when avail
 
 ### Submission notification emails
 
-Approvers can configure **Settings → Notifications** with one administrator or
+Approvers can configure **Setup → Notifications** with one administrator or
 distribution-list email address. The destination
 is stored per grain and defaults to unset. Leaving it blank disables email;
 there are no hardcoded recipients or app-level SMTP credentials. Messages use
@@ -563,7 +572,8 @@ Sandstorm's email service and the grain's own sender address, so outbound email
 must be configured on the Sandstorm server.
 
 A signed request for review or publication queues a notification with the app
-name, build, app/package IDs, and requested state. Fresh resubmissions also notify;
+name, build, app/package IDs, and requested state. SPK imports that change the
+publication request and fresh resubmissions also notify;
 status polls, exact request retries, withdrawals, raw uploads, and catalog imports
 do not. Enabling notifications does not send mail for historical submissions.
 Author review-decision emails are not implemented.

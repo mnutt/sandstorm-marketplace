@@ -74,12 +74,13 @@ pub fn retry(registry: &Registry) -> Result<()> {
 }
 
 pub(crate) fn enqueue(db: &Connection, event: &Event) -> Result<()> {
-    if !matches!(event.action.as_str(), "authorStateChanged" | "resubmitted")
-        || !matches!(
-            event.details["next"]["requestState"].as_str(),
-            Some("review" | "publish")
-        )
-    {
+    if !matches!(
+        event.action.as_str(),
+        "authorStateChanged" | "resubmitted" | "importPublicationRequested"
+    ) || !matches!(
+        event.details["next"]["requestState"].as_str(),
+        Some("review" | "publish")
+    ) {
         return Ok(());
     }
     let recipient: String =

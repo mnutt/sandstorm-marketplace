@@ -128,13 +128,20 @@ where
     result
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum UploadKind {
+    Package,
+    Catalog,
+    Publish,
+}
+
 pub(crate) async fn upload(
     registry: Registry,
     platform: PlatformSlot,
     file: tempfile::NamedTempFile,
-    import: bool,
+    kind: UploadKind,
 ) -> Result<()> {
-    if import {
+    if matches!(kind, UploadKind::Catalog) {
         run(
             registry,
             platform,
@@ -149,7 +156,13 @@ pub(crate) async fn upload(
             platform,
             false,
             move |registry, cancelled| registry.prepare_upload(file.path(), cancelled),
-            |registry, prepared, cancelled| registry.commit_upload(prepared, cancelled).map(|_| ()),
+            move |registry, prepared, cancelled| {
+                let id = registry.commit_upload(prepared, cancelled)?;
+                if matches!(kind, UploadKind::Publish) {
+                    registry.request_import_publication(&id)?;
+                }
+                Ok(())
+            },
         )
         .await
     }

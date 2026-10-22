@@ -275,6 +275,20 @@ impl Registry {
         tracing::info!(package_id = %id, version = info.get_version(), "SPK verified and stored");
         Ok(id)
     }
+    // An approver can request publication without possessing the author's key.
+    // Preserve review decisions and signed-request sequence numbers on imports.
+    pub(crate) fn request_import_publication(&self, id: &str) -> Result<()> {
+        self.audit_publication()?;
+        ensure!(
+            self.key_error(id)?.is_none(),
+            "package is blocked by signing-key rules"
+        );
+        self.mutate_audited(id, "importPublicationRequested", |mut status| {
+            status.set_request_state(s::SubmissionState::Publish);
+            Ok(())
+        })?;
+        self.publish()
+    }
     pub fn submission(&self, body: &[u8]) -> Result<Vec<u8>> {
         ensure!(
             body.len() >= 64 && body.len() <= 65536,

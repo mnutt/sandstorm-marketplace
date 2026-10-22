@@ -625,13 +625,13 @@ test('header tabs route independently and preserve navigation on reload', async 
   await expect(page.locator('#pending-count')).toHaveText('1');
   await expect(page.locator('#notifications')).toBeHidden();
   await expect(page.locator('#signing-keys')).toBeHidden();
-  await tabs.getByRole('link', { name: 'Settings', exact: true }).click();
-  await expect(page).toHaveURL(/\/admin\/settings$/);
+  await tabs.getByRole('link', { name: 'Setup', exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/setup$/);
   await expect(page.locator('#notifications')).toBeVisible();
   await expect(page.locator('#catalog-view')).toBeHidden();
   await expect(apps).not.toHaveAttribute('aria-current', 'page');
   await page.reload();
-  await expect(tabs.getByRole('link', { name: 'Settings', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(tabs.getByRole('link', { name: 'Setup', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('#notifications')).toBeVisible();
   await tabs.getByRole('link', { name: 'Key replacements', exact: true }).click();
   await expect(page.locator('#signing-keys')).toBeVisible();
@@ -648,7 +648,7 @@ test('header tabs route independently and preserve navigation on reload', async 
   await page.goto(`/admin/${app.appId}/`);
   await expect(apps).toHaveAttribute('aria-current', 'page');
   await expect(tabs.getByRole('link', { name: 'Public site' })).toHaveAttribute('href', 'http://127.0.0.1:9940/public/');
-  for (const route of ['settings', 'replacements']) {
+  for (const route of ['setup', 'replacements']) {
     await page.goto(`/reviewer/${route}`);
     await expect(page.locator('#access-note')).toBeVisible();
     await expect(tabs.locator(`[data-tab="${route}"]`)).toBeHidden();
@@ -657,7 +657,7 @@ test('header tabs route independently and preserve navigation on reload', async 
   }
 });
 
-test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }) => {
+test('setup connects Keybase through the Sandstorm Powerbox', async ({ page }) => {
   await page.route('**/admin/keybase-pb-descriptor', route => route.fulfill({ body: 'keybase-descriptor' }));
   let claimedToken;
   await page.route('**/admin/admin', async route => {
@@ -670,8 +670,8 @@ test('settings connects Keybase through the Sandstorm Powerbox', async ({ page }
     claimedToken = route.request().postData();
     return route.fulfill({ status: 204 });
   });
-  await page.goto('/admin/settings');
-  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await page.goto('/admin/setup');
+  await expect(page.getByRole('heading', { name: 'Setup', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible();
   await page.evaluate(() => {
     window.powerboxMessages = [];
@@ -724,4 +724,27 @@ test('version history orders tags, identity, dates, and connected Keybase lookup
   await expect(summary.getByRole('link', { name: 'Profile Image' })).toHaveAttribute('href', 'https://example.org/avatar.png');
   await expect(version.getByRole('button', { name: 'Look up in Keybase', exact: true })).toHaveCount(0);
   await expect(version.locator('table, script, details')).toHaveCount(0);
+});
+
+test('multiple SPK imports report failures and continue submitting valid files', async ({ page, request }) => {
+  const rows = await queue(request);
+  const hidden = rows.find(row => row.app.versionNumber === 4);
+  const pending = rows.find(row => row.app.versionNumber === 3);
+  const spk = async row => (await request.get(`/admin/download/${row.app.packageId}`)).body();
+  await page.goto('/admin/');
+  await expect(page.locator('#spk-import')).toBeHidden();
+  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await expect(page.locator('#spk-import')).toBeVisible();
+  await page.locator('#spk-import-files').setInputFiles([
+    { name: 'invalid.spk', mimeType: 'application/octet-stream', buffer: Buffer.from('invalid') },
+    { name: 'private.spk', mimeType: 'application/octet-stream', buffer: await spk(hidden) },
+    { name: 'pending.spk', mimeType: 'application/octet-stream', buffer: await spk(pending) },
+  ]);
+  await page.getByRole('button', { name: 'Import packages', exact: true }).click();
+  await expect(page.locator('#spk-import-progress')).toHaveText('2 of 3 packages submitted for publication.');
+  await expect(page.locator('#spk-import-results li')).toHaveCount(3);
+  await expect(page.locator('#spk-import-results')).toContainText('private.spk: submitted for publication');
+  expect((await queue(request)).find(row => row.app.versionNumber === 4)).toMatchObject({requestState: 'publish', review: 'pending'});
+  await page.goto('/reviewer/');
+  await expect(page.locator('#spk-import')).toBeHidden();
 });

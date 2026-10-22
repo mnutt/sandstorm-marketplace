@@ -1,3 +1,4 @@
+use crate::work::UploadKind;
 use crate::{
     api_session_capnp::api_session,
     grain_capnp::{sandstorm_api, ui_session, ui_view},
@@ -106,7 +107,7 @@ impl web::Server for Session {
                 let path = params.get()?.get_path()?.to_str()?;
                 match path {
                     "" => content(results.get(), "text/html; charset=utf-8", include_bytes!("review.html")),
-                    path if matches!(path.strip_suffix('/').unwrap_or(path), "apps" | "settings" | "notifications" | "replacements")
+                    path if matches!(path.strip_suffix('/').unwrap_or(path), "apps" | "setup" | "settings" | "notifications" | "replacements")
                         || crate::ids::parse_app_id(path.strip_suffix('/').unwrap_or(path)).is_ok() => {
                         let html = include_str!("review.html");
                         let html = if path.ends_with('/') {
@@ -215,7 +216,7 @@ impl web::Server for Session {
                 ensure!(api || can_approve, "approval permission denied");
                 // Upload/import preparation does not touch live registry state.
                 let _operation = if (api && path == "upload")
-                    || (!api && matches!(path, "import" | "signing-keys"))
+                    || (!api && matches!(path, "import" | "import-spk" | "signing-keys"))
                 {
                     None
                 } else {
@@ -230,8 +231,13 @@ impl web::Server for Session {
                             );
                             let mut temp = registry.temporary()?;
                             temp.write_all(body)?;
-                            crate::work::upload(registry.clone(), platform.clone(), temp, false)
-                                .await?;
+                            crate::work::upload(
+                                registry.clone(),
+                                platform.clone(),
+                                temp,
+                                UploadKind::Package,
+                            )
+                            .await?;
                             results.get().init_no_content();
                         }
                         "status" => content(
@@ -248,6 +254,21 @@ impl web::Server for Session {
                         crate::work::update_signing_key(registry.clone(), platform.clone(), update)
                             .await?;
                         results.get().init_no_content();
+                    } else if path == "import-spk" {
+                        ensure!(
+                            body.len() as u64 <= crate::spk::SIZE_LIMIT,
+                            "upload too large"
+                        );
+                        let mut temp = registry.temporary()?;
+                        temp.write_all(body)?;
+                        crate::work::upload(
+                            registry.clone(),
+                            platform.clone(),
+                            temp,
+                            UploadKind::Publish,
+                        )
+                        .await?;
+                        results.get().init_no_content();
                     } else if path == "import" {
                         ensure!(
                             registry.package_ids()?.is_empty(),
@@ -259,7 +280,13 @@ impl web::Server for Session {
                         );
                         let mut temp = registry.temporary()?;
                         temp.write_all(body)?;
-                        crate::work::upload(registry.clone(), platform.clone(), temp, true).await?;
+                        crate::work::upload(
+                            registry.clone(),
+                            platform.clone(),
+                            temp,
+                            UploadKind::Catalog,
+                        )
+                        .await?;
                         results.get().init_no_content();
                     } else if path == "notifications" {
                         crate::notifications::configure(&registry, std::str::from_utf8(body)?)?;
@@ -301,7 +328,8 @@ impl web::Server for Session {
                 Ok(())
             }
             .await;
-            if request_path == "status" && api
+            if (!api && can_approve && request_path == "import-spk")
+                || request_path == "status" && api
                 || (!api && can_approve && request_path == "notifications/retry")
             {
                 crate::notifications::start(registry.clone(), context.clone(), platform.clone());
@@ -324,10 +352,17 @@ impl web::Server for Session {
             let params = params.get()?;
             let path = params.get_path()?.to_str()?;
             let import = !self.api && path == "import";
-            if import {
+            let kind = if import {
+                UploadKind::Catalog
+            } else if !self.api && path == "import-spk" {
+                UploadKind::Publish
+            } else {
+                UploadKind::Package
+            };
+            if !self.api && matches!(path, "import" | "import-spk") {
                 ensure!(self.can_approve, "approval permission denied");
                 ensure!(
-                    self.registry.package_ids()?.is_empty(),
+                    !import || self.registry.package_ids()?.is_empty(),
                     "import is only available in an empty grain"
                 );
             } else if !self.api || path != "upload" {
@@ -351,6 +386,8 @@ impl web::Server for Session {
                 platform: self.platform.clone(),
                 file: Some(self.registry.temporary()?),
                 count: 0,
+                kind,
+                context: self.context.clone(),
                 import,
                 limit,
                 started: std::time::Instant::now(),
@@ -374,6 +411,8 @@ struct Upload {
     platform: PlatformSlot,
     file: Option<tempfile::NamedTempFile>,
     count: u64,
+    kind: UploadKind,
+    context: hack_session_context::Client,
     import: bool,
     limit: u64,
     started: std::time::Instant,
@@ -441,6 +480,8 @@ impl byte_stream::Server for RefCell<Upload> {
         let registry = upload.registry.clone();
         let platform = upload.platform.clone();
         let import = upload.import;
+        let kind = upload.kind;
+        let context = upload.context.clone();
         let expected = upload.expected;
         let count = upload.count;
         let started = upload.started;
@@ -455,10 +496,13 @@ impl byte_stream::Server for RefCell<Upload> {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "Upload received; processing"
                 );
-                crate::work::upload(registry, platform, file, import).await?;
+                crate::work::upload(registry.clone(), platform.clone(), file, kind).await?;
                 Ok(())
             }
             .await;
+            if matches!(kind, UploadKind::Publish) {
+                crate::notifications::start(registry, context, platform);
+            }
             if let Some(sender) = sender {
                 let _ = sender.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
             }

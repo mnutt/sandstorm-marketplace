@@ -77,6 +77,7 @@ const bundledSigningKeyNames = {
 };
 const auditEventLabels = {
   submitted: "Package submitted", imported: "Package imported",
+  importPublicationRequested: "Imported package submitted for publication",
   resubmitted: "Resubmitted — no state change",
   approved: "Approved",
   rejected: "Rejected / update requested", approvalRevoked: "Approval revoked",
@@ -135,8 +136,8 @@ if (typeof document !== "undefined") {
   document.querySelector("base").href = appBase.href;
   const currentPath = () => `/${location.pathname.slice(appBase.pathname.length)}`;
   const currentTab = () => {
-    const tab = /^(settings|notifications|replacements)\/?$/.exec(currentPath().slice(1))?.[1];
-    return tab === "notifications" ? "settings" : tab || "apps";
+    const tab = /^(setup|settings|notifications|replacements)\/?$/.exec(currentPath().slice(1))?.[1];
+    return tab === "notifications" || tab === "settings" ? "setup" : tab || "apps";
   };
   const currentAppId = () => appIdFromPath(currentPath());
   function syncSandstormPath() {
@@ -222,6 +223,8 @@ if (typeof document !== "undefined") {
       node.disabled = working || serverBusy || (node.id === "signing-key-allowed" && !$("signing-key-revoke").checked);
     });
     $("import-submit").disabled = working || serverBusy;
+    $("spk-import-submit").disabled = working || serverBusy;
+    $("spk-import-files").disabled = working || serverBusy;
     $("notifications-retry").disabled = working || serverBusy || notificationSending;
     notice(
       "access-note",
@@ -788,7 +791,7 @@ if (typeof document !== "undefined") {
       if (link.dataset.tab === tab) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
-    $("settings").hidden = tab !== "settings" || !canApprove;
+    $("setup").hidden = tab !== "setup" || !canApprove;
     $("signing-keys").hidden = tab !== "replacements" || !canApprove;
     $("catalog-heading").hidden = showingApp || tab !== "apps";
     $("catalog-view").hidden = showingApp || tab !== "apps";
@@ -825,6 +828,7 @@ if (typeof document !== "undefined") {
         : "Not connected.";
       $("keybase").textContent = keybaseConnected ? "Reconnect Keybase" : "Connect Keybase";
       serverBusy = snapshot.busy;
+      $("spk-import").hidden = !canApprove;
       $("import").hidden = !canApprove || serverBusy || items.length !== 0;
       if (canApprove && snapshot.signingKeys) {
         signingKeys = snapshot.signingKeys;
@@ -924,7 +928,7 @@ if (typeof document !== "undefined") {
     auditView = null;
     render();
     syncSandstormPath();
-    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : currentTab() === "settings" ? "#settings-heading" : currentTab() === "replacements" ? "#signing-keys-heading" : "#catalog-heading h1");
+    const heading = document.querySelector(currentAppId() ? "#app-detail h1" : currentTab() === "setup" ? "#setup-heading" : currentTab() === "replacements" ? "#signing-keys-heading" : "#catalog-heading h1");
     if (heading) {
       heading.tabIndex = -1;
       heading.focus();
@@ -1077,6 +1081,32 @@ if (typeof document !== "undefined") {
     notice("message", "Pending email delivery requested.");
     await refresh();
   });
+  $("spk-import-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const files = Array.from($("spk-import-files").files);
+    if (!files.length) return;
+    await runAction(async () => {
+      $("spk-import-results").replaceChildren();
+      let succeeded = 0;
+      try {
+        for (const [index, file] of files.entries()) {
+          $("spk-import-progress").textContent = `Uploading and verifying ${index + 1} of ${files.length}: ${file.name}`;
+          let result;
+          try {
+            await request("import-spk", file);
+            succeeded++;
+            result = `${file.name}: submitted for publication`;
+          } catch (err) {
+            result = `${file.name}: ${err.message}`;
+          }
+          $("spk-import-results").append(element("li", result));
+        }
+      } finally {
+        $("spk-import-progress").textContent = `${succeeded} of ${files.length} packages submitted for publication.`;
+        await refresh();
+      }
+    });
+  };
   $("import-form").onsubmit = async (event) => {
     event.preventDefault();
     const file = $("import-file").files[0];
