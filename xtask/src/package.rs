@@ -14,8 +14,8 @@ use std::{
     time::Instant,
 };
 
-pub const APP_VERSION: u32 = 8;
-pub const MARKETING_VERSION: &str = "0.4.2";
+pub const APP_VERSION: u32 = 9;
+pub const MARKETING_VERSION: &str = "0.4.3";
 
 pub struct Release {
     pub test_key: bool,

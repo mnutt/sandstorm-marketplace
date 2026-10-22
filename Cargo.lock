@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "marketplace-grain"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "marketplace-model"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "marketplace-sync"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "marketplace-web"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "askama",
@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "capnp",

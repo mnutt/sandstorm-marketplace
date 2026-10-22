@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 — 2026-10-22
 
 - Fixed SPK imports failing when an author’s PGP key includes third-party
   certifications, including the affected MediaWiki package. Self-certifications,
