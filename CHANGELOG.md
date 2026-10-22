@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed SPK imports failing when an author’s PGP key includes third-party
+  certifications, including the affected MediaWiki package. Self-certifications,
+  subkey bindings, and app ownership proofs remain cryptographically verified.
+
 ## 0.4.2 — 2026-10-21
 
 - Added direct import of one or more SPK packages from the administration UI,
