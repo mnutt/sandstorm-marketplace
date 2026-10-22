@@ -29,6 +29,23 @@
 </div>
 <section id="settings" hidden aria-labelledby="settings-heading">
 <div class="toolbar catalog-heading"><h1 id="settings-heading" class="catalog-title">Settings</h1></div>
+<section class="card" aria-labelledby="publishing-heading"><h2 id="publishing-heading">Web publishing</h2>
+<p>This marketplace publishes automatically as releases are approved and published. Its public site is accessible without signing in to Sandstorm.</p>
+<p id="publishing-status" class="meta" role="status">Loading publishing details…</p>
+<div id="publishing-details" hidden>
+<p>Preview available from: <a id="publishing-preview" target="_blank" rel="noopener noreferrer"></a></p>
+<h3>Set up your own domain or subdomain</h3>
+<label for="publishing-domain">Custom domain</label>
+<input id="publishing-domain" type="text" placeholder="apps.example.com" autocomplete="off" spellcheck="false" aria-describedby="publishing-domain-help">
+<p id="publishing-domain-help" class="meta">Enter a hostname without https:// or a path to fill in the instructions below. Configure these records with your DNS provider; entering a domain here does not change your DNS.</p>
+<p id="publishing-domain-error" class="reason" role="alert" hidden>Enter a valid domain, such as apps.example.com, without a protocol, port, or path.</p>
+<div id="publishing-dns" hidden>
+<p><label><input id="publishing-apex" type="checkbox"> This is a root domain (such as example.com or example.co.uk)</label></p>
+<p id="publishing-apex-warning" class="notice" hidden>A root domain cannot use a standard CNAME record. To use this domain, your DNS provider must support hostname aliasing at the root (such as ALIAS or CNAME flattening) to <code id="publishing-host"></code>. Check that your provider supports arbitrary target hostnames; some alias features only support specific hosting services. Add the TXT record below as well. If your provider does not support this, use a subdomain such as www with a standard CNAME. Provider setup varies, so no ALIAS record is generated here.</p>
+<p>Add these DNS records with your domain's DNS provider:</p>
+<pre id="publishing-records" tabindex="0" aria-label="DNS records"></pre>
+<p>DNS changes may take time to propagate. Once they do, visit your custom domain to check the public marketplace.</p>
+</div></div></section>
 <section class="card" aria-labelledby="keybase-heading"><h2 id="keybase-heading">Connect Keybase</h2>
 <p>Connect this marketplace to Keybase to look up authors using their verified PGP fingerprints. Connect once per marketplace; the connection is saved for future lookups. You can reconnect if access is revoked or stops working.</p>
 <p id="keybase-connection-status" class="meta" role="status">Checking connection…</p>

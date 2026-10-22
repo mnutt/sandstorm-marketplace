@@ -1101,9 +1101,42 @@ if (typeof document !== "undefined") {
       publicBase = url;
       $("public-url").href = url.href;
       $("public-url").hidden = false;
+      $("publishing-preview").href = url.href;
+      $("publishing-preview").textContent = url.href;
+      $("publishing-status").textContent = info.publicId
+        ? "Web publishing is enabled."
+        : "The public preview is available, but custom-domain details are unavailable.";
+      $("publishing-details").hidden = false;
+      $("publishing-domain").disabled = !info.publicId;
+      $("publishing-host").textContent = url.hostname;
+      const updatePublishingRecords = () => {
+        const domain = $("publishing-domain").value.trim().toLowerCase().replace(/\.$/, "");
+        const valid = domain.length <= 253 && domain.includes(".") && domain.split(".").every(
+          label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
+        );
+        $("publishing-domain-error").hidden = !domain || valid;
+        $("publishing-domain").setAttribute("aria-invalid", String(!!domain && !valid));
+        $("publishing-dns").hidden = !valid;
+        const apex = $("publishing-apex").checked;
+        $("publishing-apex-warning").hidden = !apex;
+        $("publishing-records").textContent = valid
+          ? `${apex ? "" : `${domain}. IN CNAME ${url.hostname}.\n`}sandstorm-www.${domain}. IN TXT "${info.publicId}"`
+          : "";
+      };
+      $("publishing-domain").oninput = () => {
+        const domain = $("publishing-domain").value.trim().replace(/\.$/, "");
+        // Two-label names are usually apex domains. Allow an explicit choice
+        // for multi-label public suffixes and independently delegated zones.
+        $("publishing-apex").checked = domain.split(".").length === 2;
+        updatePublishingRecords();
+      };
+      $("publishing-apex").onchange = updatePublishingRecords;
       render();
     })
-    .catch((err) => notice("error", err.message));
+    .catch((err) => {
+      $("publishing-status").textContent = "Unable to load publishing details. Reload the page to try again.";
+      notice("error", err.message);
+    });
   // Do not replace focused controls or interrupt a review decision during automatic refresh.
   setInterval(() => {
     if (
